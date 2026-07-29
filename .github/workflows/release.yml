@@ -75,6 +75,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # builder.sh has no --build-arg option, so the application image is pinned
+      # into the add-on Dockerfile's ARG default before the builder runs.
+      - name: Pin the application image
+        run: |
+          sed -i "s|^ARG APP_IMAGE=.*|ARG APP_IMAGE=${{ env.IMAGE }}:${{ needs.app-image.outputs.version }}|" addon/Dockerfile
+          grep '^ARG APP_IMAGE=' addon/Dockerfile
+
       # The Home Assistant builder wraps the application image, which is why it
       # runs only after app-image has pushed.
       - name: Build add-on
@@ -86,5 +93,4 @@ jobs:
             --image novee2mqtt-{arch} \
             --docker-hub ghcr.io/${{ github.repository_owner }} \
             --addon \
-            --version ${{ needs.app-image.outputs.version }} \
-            --build-arg APP_IMAGE=${{ env.IMAGE }}:${{ needs.app-image.outputs.version }}
+            --version ${{ needs.app-image.outputs.version }}
