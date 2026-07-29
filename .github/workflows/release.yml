@@ -64,8 +64,9 @@ jobs:
     needs: app-image
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, aarch64, armv7]
+        # The Home Assistant builder dropped 32-bit ARM: it accepts only amd64
+        # and aarch64. The standalone image below still ships linux/arm/v7.
+        arch: [amd64, aarch64]
     steps:
       - uses: actions/checkout@v4
 

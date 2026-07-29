@@ -2,13 +2,12 @@ name: Novee2Mqtt
 version: "0.0.1"
 slug: novee2mqtt
 description: Control Govee devices from Home Assistant over MQTT
-url: https://github.com/borexola/Novee2Mqtt
+url: https://github.com/borexola/novee2mqtt
 image: ghcr.io/borexola/novee2mqtt-{arch}
 
 arch:
   - amd64
   - aarch64
-  - armv7
 
 init: false
 startup: services
