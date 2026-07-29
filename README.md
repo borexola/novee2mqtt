@@ -70,7 +70,23 @@ of them there is also no broker to publish to.
 * [FAQ](docs/FAQ.md)
 * [Privacy](docs/PRIVACY.md)
 
-## Quick start with Docker Compose
+## Quick start (Home Assistant add-on)
+
+Running Home Assistant OS or Supervised? Novee2Mqtt installs as a native add-on —
+no Docker commands, no YAML files:
+
+[![Add repository to your Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fborexola%2Fnovee2mqtt)
+
+1. Click the badge above (or **Settings → Add-ons → Add-on Store → ⋮ → Repositories**
+   and add `https://github.com/borexola/novee2mqtt`), then install **Novee2Mqtt**.
+2. Open the *Configuration* tab. If you run the Mosquitto add-on, the broker is
+   detected automatically — you only need to add your Govee email, password and
+   API key for cloud devices and scenes.
+3. Start it, then click **OPEN WEB UI** to see your devices.
+
+Supported on `amd64` and `aarch64`. Full walkthrough in [docs/ADDON.md](docs/ADDON.md).
+
+## Quick start (Docker)
 
 ```bash
 cp .env.example .env
@@ -80,6 +96,12 @@ Fill in at least `GOVEE_MQTT_HOST`, then:
 
 ```bash
 docker compose up -d
+```
+
+Or without compose:
+
+```bash
+docker run -d --name novee2mqtt --restart unless-stopped --network host -v novee2mqtt-cache:/data --env-file .env ghcr.io/borexola/novee2mqtt:latest
 ```
 
 Host networking is required — the Govee LAN protocol needs to receive replies on
