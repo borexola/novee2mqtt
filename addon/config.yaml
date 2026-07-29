@@ -1,0 +1,46 @@
+name: Novee2Mqtt
+version: "0.0.1"
+slug: novee2mqtt
+description: Control Govee devices from Home Assistant over MQTT
+url: https://github.com/borexola/Novee2Mqtt
+image: ghcr.io/borexola/novee2mqtt-{arch}
+
+arch:
+  - amd64
+  - aarch64
+  - armv7
+
+init: false
+startup: services
+
+# The add-on is useless without a broker, so let the supervisor guarantee one.
+services:
+  - mqtt:need
+
+apparmor: true
+
+webui: http://[HOST]:[PORT:8056]/assets/index.html
+
+# The Govee LAN protocol needs to receive replies on UDP 4002 and to send
+# multicast and broadcast discovery packets, neither of which works from inside
+# the add-on's own network namespace.
+host_network: true
+
+options:
+  temperature_scale: "C"
+
+schema:
+  temperature_scale: "str?"
+  govee_email: "str?"
+  govee_password: "password?"
+  govee_api_key: "password?"
+  mqtt_host: "str?"
+  mqtt_port: "int?"
+  mqtt_username: "str?"
+  mqtt_password: "password?"
+  debug_level: "list(trace|debug|info|warn|error)?"
+  no_multicast: "bool?"
+  broadcast_all: "bool?"
+  global_broadcast: "bool?"
+  scan: "str?"
+  http_port: "int?"

@@ -1,0 +1,19 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Local credentials for `docker compose` and `dotnet run`.
+# .env.example is the only one that may ever be committed.
+.env
+.env.*
+!.env.example
+*.p12
+secrets/
+
+# Published output
+publish/
+artifacts/
+dist/

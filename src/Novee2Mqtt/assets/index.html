@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Novee2Mqtt</title>
+    <link rel="icon" href="/assets/favicon.ico" type="image/x-icon" />
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__mark" aria-hidden="true"></div>
+        <div>
+          <h1 class="brand__name">Novee2Mqtt</h1>
+          <p class="brand__sub">Govee &rarr; Home Assistant bridge</p>
+        </div>
+      </div>
+
+      <div class="search">
+        <input id="search" type="search" placeholder="Filter devices" aria-label="Filter devices" />
+      </div>
+
+      <div class="stats">
+        <span id="dot" class="dot dot--down" title="Connecting"></span>
+        <span id="counts">connecting</span>
+      </div>
+
+      <button id="purge" class="iconbtn" title="Purge cached device data" aria-label="Purge caches">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5" />
+        </svg>
+      </button>
+
+      <button id="theme" class="iconbtn" title="Toggle light and dark" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+        </svg>
+      </button>
+    </header>
+
+    <main id="content">
+      <div class="grid">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+    </main>
+
+    <div id="toasts" aria-live="polite"></div>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

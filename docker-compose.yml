@@ -1,0 +1,17 @@
+services:
+  novee2mqtt:
+    image: ghcr.io/borexola/novee2mqtt:latest
+    # To build locally instead of pulling:
+    # build: .
+    container_name: novee2mqtt
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Host networking is required: the Govee LAN protocol needs to receive
+    # replies on UDP port 4002 and to send multicast/broadcast discovery.
+    network_mode: host
+    volumes:
+      - novee2mqtt-cache:/data
+
+volumes:
+  novee2mqtt-cache:

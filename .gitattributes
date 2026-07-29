@@ -1,0 +1,12 @@
+# Normalise to LF in the repository. run.sh and the Dockerfiles are consumed by
+# Linux containers, where CRLF breaks the shebang, so this is correctness rather
+# than tidiness for anyone cloning on Windows.
+* text=auto eol=lf
+
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+*.ico binary
+*.png binary
+*.tar binary
+*.gz binary

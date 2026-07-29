@@ -1,0 +1,30 @@
+<Solution>
+  <Folder Name="/docker/">
+    <File Path=".dockerignore" />
+    <File Path=".env.example" />
+    <File Path="docker-compose.yml" />
+    <File Path="Dockerfile" />
+  </Folder>
+  <Folder Name="/addon/">
+    <File Path="addon/build.yaml" />
+    <File Path="addon/config.yaml" />
+    <File Path="addon/Dockerfile" />
+    <File Path="addon/run.sh" />
+    <File Path="repository.yaml" />
+  </Folder>
+  <Folder Name="/docs/">
+    <File Path="README.md" />
+    <File Path="docs/ADDON.md" />
+    <File Path="docs/CONFIG.md" />
+    <File Path="docs/DOCKER.md" />
+    <File Path="docs/FAQ.md" />
+    <File Path="docs/LAN.md" />
+    <File Path="docs/PRIVACY.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Novee2Mqtt/Novee2Mqtt.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Novee2Mqtt.Tests/Novee2Mqtt.Tests.csproj" />
+  </Folder>
+</Solution>

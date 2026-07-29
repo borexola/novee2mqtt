@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>novee2mqtt</AssemblyName>
+    <RootNamespace>Novee2Mqtt</RootNamespace>
+    <UserSecretsId>novee2mqtt</UserSecretsId>
+    <!-- The web SDK would otherwise try to serve ./wwwroot; we serve ./assets ourselves. -->
+    <DisableImplicitFrameworkReferences>false</DisableImplicitFrameworkReferences>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <!-- Microsoft.Data.Sqlite 10.0.10 still pulls the 2.1.11 native bundle, which
+         carries advisory GHSA-2m69-gcr7-jv3q. Pin the patched line explicitly. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Novee2Mqtt.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="AmazonRootCA1.pem" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
