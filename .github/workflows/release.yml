@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 1.0.0"
+        description: "Version to publish, e.g. 1.0.0. To test the workflow instead, append a suffix to the configured version, e.g. 1.0.0-test."
         required: true
 
 permissions:
@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.check.outputs.release }}
     steps:
       - uses: actions/checkout@v7
 
@@ -38,11 +39,25 @@ jobs:
       # addon/config.yaml and pulls the image tagged with it. A release whose
       # tag disagrees with that file would publish images nobody can install,
       # so refuse it here rather than find out from a user.
+      #
+      # A manual run may instead use the configured version plus a suffix,
+      # e.g. 0.0.2-test. That exercises the whole workflow and pushes images
+      # under a tag the Supervisor never asks for, so no installable image is
+      # touched; such a test build also leaves the `latest` tag alone.
       - name: Check the add-on version matches
+        id: check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          EVENT: ${{ github.event_name }}
         run: |
           configured=$(sed -nE 's/^version: *"?([^"]*)"?$/\1/p' addon/config.yaml)
-          if [ "$configured" != "${{ steps.version.outputs.version }}" ]; then
-            echo "::error::addon/config.yaml declares version '$configured' but this release is '${{ steps.version.outputs.version }}'. Bump addon/config.yaml before tagging."
+          if [ "$configured" = "$VERSION" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = workflow_dispatch ] && [ "${VERSION#"$configured"-}" != "$VERSION" ]; then
+            echo "::notice::Test build: '$VERSION' is not the configured version '$configured'. Images are pushed under that tag only and 'latest' is left alone."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::addon/config.yaml declares version '$configured' but this release is '$VERSION'. Bump addon/config.yaml before tagging."
             exit 1
           fi
 
@@ -65,50 +80,84 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           tags: |
-            ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ steps.check.outputs.release == 'true' && format('{0}:latest', env.IMAGE) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  addon-image:
-    name: Add-on image (${{ matrix.arch }})
+  # Nothing in Home Assistant reads addon/build.yaml for an add-on that is
+  # pulled from a registry, but it remains the one place that declares the
+  # base images and labels. This job turns it into inputs for the image builds;
+  # it runs on x64 because the ARM runner image does not ship yq.
+  addon-config:
+    name: Read add-on configuration
     runs-on: ubuntu-latest
-    needs: app-image
-    strategy:
-      fail-fast: false
-      matrix:
-        # The Home Assistant builder dropped 32-bit ARM: it accepts only amd64
-        # and aarch64. The standalone image below still ships linux/arm/v7.
-        arch: [amd64, aarch64]
+    outputs:
+      build_from: ${{ steps.read.outputs.build_from }}
+      labels: ${{ steps.read.outputs.labels }}
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # builder.sh has no --build-arg option, so the application image is pinned
-      # into the add-on Dockerfile's ARG default before the builder runs.
-      - name: Pin the application image
+      # The legacy builder derived the io.hass.* labels from config.yaml, so
+      # they are kept here; build-image adds io.hass.arch and io.hass.version.
+      - name: Read build.yaml and config.yaml
+        id: read
         run: |
-          sed -i "s|^ARG APP_IMAGE=.*|ARG APP_IMAGE=${{ env.IMAGE }}:${{ needs.app-image.outputs.version }}|" addon/Dockerfile
-          grep '^ARG APP_IMAGE=' addon/Dockerfile
+          {
+            echo "build_from=$(yq -o=json -I=0 '.build_from' addon/build.yaml)"
+            echo "labels<<EOF"
+            echo "io.hass.type=addon"
+            echo "io.hass.name=$(yq '.name' addon/config.yaml)"
+            echo "io.hass.description=$(yq '.description' addon/config.yaml)"
+            echo "io.hass.url=$(yq '.url' addon/config.yaml)"
+            yq '.labels | to_entries[] | .key + "=" + .value' addon/build.yaml
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
 
-      # The Home Assistant builder wraps the application image, which is why it
-      # runs only after app-image has pushed.
-      # 2026.02.1 is the last builder release that ships a builder image; newer
-      # tags of the action exist but pull an image that was never published,
-      # and the action itself is deprecated in favour of Home Assistant's new
-      # reusable workflows. Migrating to those is the next step for this job.
-      - name: Build add-on
-        uses: home-assistant/builder@2026.02.1
+  addon-image:
+    name: Add-on image (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    needs: [app-image, addon-config]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Home Assistant builds add-ons for amd64 and aarch64 only, each on a
+        # native runner, which is exactly what its prepare-multi-arch-matrix
+        # action would produce. That action, however, names images
+        # "{arch}-novee2mqtt", whereas this add-on was published as
+        # "novee2mqtt-{arch}" (see addon/config.yaml), so the matrix is spelled
+        # out here. The standalone image above still ships linux/arm/v7.
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      # The add-on image wraps the application image, which is why this job
+      # runs only after app-image has pushed. build-image is the replacement
+      # Home Assistant recommends for the deprecated home-assistant/builder
+      # action: it supplies BUILD_ARCH and BUILD_VERSION itself, adds the
+      # io.hass.arch/version and OCI created/source/version labels the legacy
+      # builder used to add, and verifies the base image's cosign signature
+      # before building. The add-on images themselves were never signed, and
+      # the Supervisor does not check third-party add-ons, so cosign stays off.
+      - name: Build and push
+        uses: home-assistant/builder/actions/build-image@2026.09.0
         with:
-          args: |
-            --${{ matrix.arch }} \
-            --target /data/addon \
-            --image novee2mqtt-{arch} \
-            --docker-hub ghcr.io/${{ github.repository_owner }} \
-            --addon \
-            --version ${{ needs.app-image.outputs.version }}
+          arch: ${{ matrix.arch }}
+          context: addon
+          image: ${{ env.IMAGE }}-${{ matrix.arch }}
+          image-tags: ${{ needs.app-image.outputs.version }}
+          version: ${{ needs.app-image.outputs.version }}
+          push: "true"
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          build-args: |
+            BUILD_FROM=${{ fromJSON(needs.addon-config.outputs.build_from)[matrix.arch] }}
+            APP_IMAGE=${{ env.IMAGE }}:${{ needs.app-image.outputs.version }}
+          labels: ${{ needs.addon-config.outputs.labels }}
+          cosign: "false"
+          cosign-base-verify: ${{ fromJSON(needs.addon-config.outputs.build_from)[matrix.arch] }}
+          cosign-base-identity: https://github.com/home-assistant/docker-base/.*
+          cache-gha-scope: addon

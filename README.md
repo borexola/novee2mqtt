@@ -181,6 +181,19 @@ Supervisor pulls the image tagged with that version. To release, bump that file,
 commit, then tag the commit `v<version>`. The release workflow refuses a tag that
 disagrees with the file.
 
+The workflow publishes the application image `ghcr.io/borexola/novee2mqtt` for
+amd64, arm64 and armv7, then wraps it into the add-on images
+`ghcr.io/borexola/novee2mqtt-{amd64,aarch64}` with Home Assistant's
+[`build-image` action](https://github.com/home-assistant/builder), using the base
+images and labels declared in `addon/build.yaml`.
+
+To test the workflow without publishing a release, run it manually (Actions →
+Release → Run workflow) with the configured version plus a suffix, for example
+`0.0.2-test`. Everything runs as for a release, but the images are pushed only
+under that tag, which the Supervisor never asks for, and `latest` is left alone.
+Any other version that disagrees with `addon/config.yaml` is refused. Delete the
+test tags from the GitHub packages afterwards if you do not want them around.
+
 ## Licence and credits
 
 MIT. See [LICENSE.md](LICENSE.md).
