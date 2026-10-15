@@ -1,5 +1,5 @@
 name: Novee2Mqtt
-version: "0.0.1"
+version: "0.0.2"
 slug: novee2mqtt
 description: Control Govee devices from Home Assistant over MQTT
 url: https://github.com/borexola/novee2mqtt
