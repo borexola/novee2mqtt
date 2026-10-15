@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
     <!-- Microsoft.Data.Sqlite 10.0.10 still pulls the 2.1.11 native bundle, which
          carries advisory GHSA-2m69-gcr7-jv3q. Pin the patched line explicitly. -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
