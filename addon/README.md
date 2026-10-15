@@ -26,7 +26,7 @@ set up first; the add-on will not start without a broker.
 | `mqtt_host` / `mqtt_port` / `mqtt_username` / `mqtt_password` | Override the broker Home Assistant already provides. |
 | `debug_level` | `trace`, `debug`, `info`, `warn`, `error`. |
 | `no_multicast` / `broadcast_all` / `global_broadcast` / `scan` | LAN discovery tuning. |
-| `http_port` | Status page port. Default 8056. |
+| `http_port` | Status page port. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Full documentation: <https://github.com/borexola/Novee2Mqtt/blob/main/docs/CONFIG.md>
 

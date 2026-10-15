@@ -24,7 +24,9 @@ const KELVIN_PRESETS = [2200, 2700, 3500, 4500, 5500, 6500];
 const ui = {
   devices: [],
   cards: new Map(),
-  layout: "",
+  // Null rather than "" so the first render always replaces the loading
+  // skeletons, even when the device list is empty.
+  layout: null,
   filter: "",
   suppressed: new Map(),
   tabs: new Map(),
@@ -144,7 +146,7 @@ function buildCard(device) {
       refs.power.setAttribute("aria-checked", String(next));
       refs.root.classList.toggle("is-on", next);
       suppress(id);
-      await call(`/api/device/${encodeURIComponent(id)}/power/${next ? "on" : "off"}`);
+      await call(`api/device/${encodeURIComponent(id)}/power/${next ? "on" : "off"}`);
     },
   });
 
@@ -159,7 +161,7 @@ function buildCard(device) {
   });
   refs.bright.addEventListener("change", async () => {
     suppress(id);
-    await call(`/api/device/${encodeURIComponent(id)}/brightness/${refs.bright.value}`);
+    await call(`api/device/${encodeURIComponent(id)}/brightness/${refs.bright.value}`);
   });
 
   // Colour panel
@@ -174,7 +176,7 @@ function buildCard(device) {
           refs.picker.value = color;
           applyAccent(refs, color);
           suppress(id);
-          await call(`/api/device/${encodeURIComponent(id)}/color/${color.slice(1)}`);
+          await call(`api/device/${encodeURIComponent(id)}/color/${color.slice(1)}`);
         },
       })));
 
@@ -183,7 +185,7 @@ function buildCard(device) {
   refs.picker.addEventListener("change", async () => {
     applyAccent(refs, refs.picker.value);
     suppress(id);
-    await call(`/api/device/${encodeURIComponent(id)}/color/${refs.picker.value.slice(1)}`);
+    await call(`api/device/${encodeURIComponent(id)}/color/${refs.picker.value.slice(1)}`);
   });
 
   const colorPanel = el("div", { class: "panel", "data-panel": "color" }, [
@@ -205,7 +207,7 @@ function buildCard(device) {
   refs.kelvin.addEventListener("change", async () => {
     suppress(id);
     applyAccent(refs, kelvinToHex(Number(refs.kelvin.value)));
-    await call(`/api/device/${encodeURIComponent(id)}/colortemp/${refs.kelvin.value}`);
+    await call(`api/device/${encodeURIComponent(id)}/colortemp/${refs.kelvin.value}`);
   });
 
   const whitePanel = el("div", { class: "panel", "data-panel": "white" }, [
@@ -227,7 +229,7 @@ function buildCard(device) {
             refs.kelvinValue.textContent = `${k}K`;
             applyAccent(refs, kelvinToHex(k));
             suppress(id);
-            await call(`/api/device/${encodeURIComponent(id)}/colortemp/${k}`);
+            await call(`api/device/${encodeURIComponent(id)}/colortemp/${k}`);
           },
         }))),
   ]);
@@ -239,7 +241,7 @@ function buildCard(device) {
   refs.scene.addEventListener("change", async () => {
     if (!refs.scene.value) return;
     suppress(id);
-    await call(`/api/device/${encodeURIComponent(id)}/scene/${encodeURIComponent(refs.scene.value)}`);
+    await call(`api/device/${encodeURIComponent(id)}/scene/${encodeURIComponent(refs.scene.value)}`);
   });
 
   const scenePanel = el("div", { class: "panel", "data-panel": "scene" }, [refs.scene]);
@@ -300,7 +302,7 @@ async function loadScenes(id, refs) {
   ui.scenes.set(id, true);
 
   try {
-    const response = await fetch(`/api/device/${encodeURIComponent(id)}/scenes`);
+    const response = await fetch(`api/device/${encodeURIComponent(id)}/scenes`);
     const scenes = response.ok ? await response.json() : [];
     refs.scene.replaceChildren(
       el("option", { value: "", text: scenes.length ? "Select a scene..." : "No scenes available" }),
@@ -416,11 +418,11 @@ function render(devices) {
           room === "Ungrouped" ? null : el("div", { class: "room__actions" }, [
             el("button", {
               class: "chip", text: "All on",
-              onclick: () => call(`/api/room/${encodeURIComponent(room)}/power/on`),
+              onclick: () => call(`api/room/${encodeURIComponent(room)}/power/on`),
             }),
             el("button", {
               class: "chip", text: "All off",
-              onclick: () => call(`/api/room/${encodeURIComponent(room)}/power/off`),
+              onclick: () => call(`api/room/${encodeURIComponent(room)}/power/off`),
             }),
           ]),
         ]),
@@ -492,7 +494,7 @@ function accept(payload) {
 
 async function pollOnce() {
   try {
-    const response = await fetch("/api/devices");
+    const response = await fetch("api/devices");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     accept(await response.json());
   } catch {
@@ -509,7 +511,7 @@ function start() {
   }
 
   let polling = null;
-  const stream = new EventSource("/api/events");
+  const stream = new EventSource("api/events");
 
   stream.onopen = () => setConnection("live");
 
@@ -566,7 +568,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("#purge").addEventListener("click", async () => {
-    if (await call("/api/purge-caches", { method: "POST" })) {
+    if (await call("api/purge-caches", { method: "POST" })) {
       toast("Caches purged; devices will be re-fetched.", "ok");
     }
   });

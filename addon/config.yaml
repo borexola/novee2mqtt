@@ -18,7 +18,15 @@ services:
 
 apparmor: true
 
-webui: http://[HOST]:[PORT:8056]/assets/index.html
+webui: http://[HOST]:[PORT:8056]/
+
+# The control panel in the Home Assistant sidebar. Ingress proxies the panel
+# through Home Assistant, so it works remotely and needs no extra login. With
+# host networking the port has to be stated, and it must match http_port.
+ingress: true
+ingress_port: 8056
+panel_icon: mdi:lightbulb-group
+panel_title: Novee2Mqtt
 
 # The Govee LAN protocol needs to receive replies on UDP 4002 and to send
 # multicast and broadcast discovery packets, neither of which works from inside

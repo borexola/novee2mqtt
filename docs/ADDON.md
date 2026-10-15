@@ -26,7 +26,7 @@ Open the add-on's **Configuration** tab.
 | `mqtt_host`, `mqtt_port`, `mqtt_username`, `mqtt_password` | Only needed to override the broker Home Assistant already knows about. |
 | `debug_level` | `trace`, `debug`, `info`, `warn` or `error`. |
 | `no_multicast`, `broadcast_all`, `global_broadcast`, `scan` | LAN discovery tuning — see [CONFIG.md](CONFIG.md). |
-| `http_port` | Port for the add-on's status page. Default 8056. |
+| `http_port` | Port for the add-on's status page. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Leaving everything blank still works: the add-on will find devices that have LAN
 control enabled and publish them through the broker Home Assistant provides.
@@ -40,8 +40,14 @@ should support LAN control but did not answer.
 Devices appear in Home Assistant automatically through MQTT discovery. Ones with
 a room set in the Govee app are suggested into the matching area.
 
-The **Open Web UI** button shows the bridge's own status page, which is useful
-for confirming what state it is holding and where that state came from.
+The control panel also appears as **Novee2Mqtt** in the Home Assistant sidebar.
+It is served through Home Assistant ingress, so it works from the mobile app and
+over remote access without exposing the add-on's port. The **Open Web UI**
+button shows the same page directly on port 8056, which is useful for
+confirming what state the bridge is holding and where that state came from.
+
+The sidebar panel needs the bridge on port 8056; if you change `http_port`, the
+panel stops working and only the direct address remains.
 
 ## Notes
 

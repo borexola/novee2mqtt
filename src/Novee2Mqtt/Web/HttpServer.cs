@@ -90,7 +90,18 @@ public static class HttpServer
             });
         }
 
-        app.MapGet("/", () => Results.Redirect("/assets/index.html"));
+        // The page is served at the root, and everything it references is a
+        // relative URL. That is what lets Home Assistant ingress proxy it from
+        // under /api/hassio_ingress/<token>/: an absolute redirect or an
+        // absolute /assets/... link would escape that prefix.
+        var index = Path.Combine(assetsPath, "index.html");
+        app.MapGet("/", () => File.Exists(index)
+            ? Results.File(index, "text/html; charset=utf-8")
+            : Results.NotFound());
+
+        // The address the add-on's "Open Web UI" button used before the page
+        // moved to the root.
+        app.MapGet("/assets/index.html", () => Results.Redirect("../"));
     }
 
     private static async Task<List<DeviceItem>> BuildItemsAsync(ServiceState state)

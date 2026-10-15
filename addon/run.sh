@@ -68,6 +68,9 @@ fi
 
 if bashio::config.has_value http_port ; then
   export GOVEE_HTTP_PORT="$(bashio::config http_port)"
+  if [ "$GOVEE_HTTP_PORT" != "8056" ]; then
+    bashio::log.warning "http_port is $GOVEE_HTTP_PORT; the sidebar panel only works on port 8056"
+  fi
 fi
 
 # Show the resulting configuration, with anything sensitive masked.

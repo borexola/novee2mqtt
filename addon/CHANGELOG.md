@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The control panel is available in the Home Assistant sidebar, served through
+  ingress, so it works from the mobile app and over remote access. The panel
+  needs the bridge on port 8056.
+
+### Fixed
+
+- The control panel showed loading placeholders forever when no devices had
+  been found, instead of explaining what to configure.
+
 ## 0.0.2
 
 Makes the bridge cheaper on Govee's rate-limited API, more resilient to cloud
