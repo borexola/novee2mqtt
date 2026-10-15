@@ -98,8 +98,12 @@ jobs:
 
       # The Home Assistant builder wraps the application image, which is why it
       # runs only after app-image has pushed.
+      # 2026.02.1 is the last builder release that ships a builder image; newer
+      # tags of the action exist but pull an image that was never published,
+      # and the action itself is deprecated in favour of Home Assistant's new
+      # reusable workflows. Migrating to those is the next step for this job.
       - name: Build add-on
-        uses: home-assistant/builder@2026.09.0
+        uses: home-assistant/builder@2026.02.1
         with:
           args: |
             --${{ matrix.arch }} \
