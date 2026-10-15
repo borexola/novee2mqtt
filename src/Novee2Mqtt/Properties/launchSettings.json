@@ -2,11 +2,12 @@
   "profiles": {
     "Novee2Mqtt": {
       "commandName": "Project",
+      "commandLineArgs": "serve",
       "launchBrowser": true,
+      "applicationUrl": "http://localhost:8056",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
-      },
-      "applicationUrl": "https://localhost:53826;http://localhost:53827"
+      }
     }
   }
 }

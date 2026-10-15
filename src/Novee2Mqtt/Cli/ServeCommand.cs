@@ -3,7 +3,6 @@ using System.Net.Sockets;
 using Novee2Mqtt.Core;
 using Novee2Mqtt.Devices;
 using Novee2Mqtt.Hass;
-using Novee2Mqtt.Iot;
 using Novee2Mqtt.Lan;
 using Novee2Mqtt.Web;
 using Microsoft.Extensions.Logging;
@@ -23,17 +22,17 @@ public static class ServeCommand
 
         log.LogInformation("Starting service. version {Version}", VersionInfo.Version);
 
-        await LoadPlatformDevicesAsync(app, log, cancellationToken).ConfigureAwait(false);
-
-        await using var iotClient = await LoadUndocDevicesAsync(app, log, cancellationToken).ConfigureAwait(false);
+        await using var cloud = new CloudServices(app, log);
+        await cloud.LoadAsync(cancellationToken).ConfigureAwait(false);
 
         await using var lanClient = await StartLanDiscoveryAsync(app, log, cancellationToken).ConfigureAwait(false);
 
         await ReportDeviceInventoryAsync(app, log).ConfigureAwait(false);
 
-        using var poller = new CancellationTokenSource();
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, poller.Token);
+        using var background = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, background.Token);
         var pollTask = Task.Run(() => PeriodicStatePollAsync(state, log, linked.Token), CancellationToken.None);
+        var cloudTask = Task.Run(() => CloudMaintenanceAsync(app, cloud, log, linked.Token), CancellationToken.None);
 
         await using var hassClient = await StartHassAsync(app, log, cancellationToken).ConfigureAwait(false);
 
@@ -42,27 +41,81 @@ public static class ServeCommand
 
         try
         {
+            // Returns normally once the token is cancelled; it does not throw.
             await httpApp.RunAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            log.LogInformation("Shutting down");
         }
         finally
         {
-            await poller.CancelAsync().ConfigureAwait(false);
-            try
+            log.LogInformation("Shutting down");
+
+            await background.CancelAsync().ConfigureAwait(false);
+            foreach (var task in new[] { pollTask, cloudTask })
             {
-                await pollTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected.
+                try
+                {
+                    await task.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected.
+                }
             }
             await httpApp.DisposeAsync().ConfigureAwait(false);
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Retries whichever cloud APIs failed at startup, with backoff, and once
+    /// everything is up re-reads the device lists hourly so devices added to
+    /// the account appear without a restart.
+    /// </summary>
+    private static async Task CloudMaintenanceAsync(GoveeApp app, CloudServices cloud, ILogger log, CancellationToken cancellationToken)
+    {
+        var retry = TimeSpan.FromMinutes(1);
+        var maxRetry = TimeSpan.FromHours(1);
+        var refreshInterval = TimeSpan.FromHours(1);
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var complete = cloud.IsComplete;
+            await Task.Delay(complete ? refreshInterval : retry, cancellationToken).ConfigureAwait(false);
+
+            bool changed;
+            if (complete)
+            {
+                changed = await cloud.RefreshAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                log.LogInformation("Retrying the cloud APIs that failed earlier");
+                changed = await cloud.LoadAsync(cancellationToken).ConfigureAwait(false);
+
+                if (cloud.IsComplete)
+                {
+                    log.LogInformation("All configured cloud APIs are now available");
+                    retry = TimeSpan.FromMinutes(1);
+                }
+                else
+                {
+                    retry = retry * 2 > maxRetry ? maxRetry : retry * 2;
+                }
+            }
+
+            if (changed && app.State.HassClient is { } hass)
+            {
+                log.LogInformation("Device information changed; re-registering with Home Assistant");
+                try
+                {
+                    await hass.RegisterWithHassAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    log.LogError("Re-registering with Home Assistant failed: {Message}", ex.Message);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -108,86 +161,6 @@ public static class ServeCommand
         log.LogInformation("Web UI ready at {Addresses}", string.Join("  ", addresses));
     }
 
-    private static async Task LoadPlatformDevicesAsync(GoveeApp app, ILogger log, CancellationToken cancellationToken)
-    {
-        if (app.CreatePlatformClient() is not { } client)
-        {
-            return;
-        }
-
-        log.LogInformation("Querying platform API for device list");
-
-        try
-        {
-            foreach (var info in await client.GetDevicesAsync(cancellationToken).ConfigureAwait(false))
-            {
-                await app.State.UpdateDeviceAsync(info.Sku, info.Device, d => d.SetHttpDeviceInfo(info))
-                    .ConfigureAwait(false);
-            }
-
-            app.State.PlatformClient = client;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Losing the Platform API is survivable: LAN and IoT still work.
-            log.LogError("Failed to query the platform API: {Message}", ex.Message);
-            app.State.PlatformClient = client;
-        }
-    }
-
-    private static async Task<IotClient?> LoadUndocDevicesAsync(GoveeApp app, ILogger log, CancellationToken cancellationToken)
-    {
-        if (app.CreateUndocClient() is not { } client)
-        {
-            return null;
-        }
-
-        log.LogInformation("Querying undocumented API for device + room list");
-
-        Undocumented.LoginAccountResponse account;
-        try
-        {
-            account = await client.LoginAccountAsync(cancellationToken).ConfigureAwait(false);
-
-            var info = await client.GetDeviceListAsync(account.Token, cancellationToken).ConfigureAwait(false);
-            var roomsByGroupId = info.Groups.ToDictionary(g => g.GroupId, g => g.GroupName);
-
-            foreach (var entry in info.Devices)
-            {
-                var roomName = roomsByGroupId.GetValueOrDefault(entry.GroupId);
-                await app.State.UpdateDeviceAsync(entry.Sku, entry.Device, d => d.SetUndocDeviceInfo(entry, roomName))
-                    .ConfigureAwait(false);
-            }
-
-            app.State.UndocClient = client;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            log.LogError("Failed to query the undocumented API: {Message}", ex.Message);
-            return null;
-        }
-
-        try
-        {
-            var iotKey = await client.GetIotKeyAsync(account.Token, cancellationToken).ConfigureAwait(false);
-
-            var iot = IotClient.Create(
-                app.LoggerFactory.CreateLogger<IotClient>(), iotKey, account, app.Options.AmazonRootCa);
-
-            iot.PacketHandler = app.State.ApplyIotPacketAsync;
-            await iot.StartAsync(cancellationToken).ConfigureAwait(false);
-
-            app.State.IotClient = iot;
-            return iot;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Without IoT we fall back to polling, which still works.
-            log.LogError("Failed to start the AWS IoT client: {Message}", ex.Message);
-            return null;
-        }
-    }
-
     private static async Task<LanClient?> StartLanDiscoveryAsync(GoveeApp app, ILogger log, CancellationToken cancellationToken)
     {
         var options = app.Options.ToDiscoOptions();
@@ -213,29 +186,46 @@ public static class ServeCommand
 
         _ = Task.Run(async () =>
         {
-            await foreach (var lanDevice in client.Discovered.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            try
             {
-                log.LogTrace("LAN disco: {Sku} {Device} at {Ip}", lanDevice.Sku, lanDevice.Device, lanDevice.Ip);
-
-                await app.State.UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device, d => d.SetLanDevice(lanDevice))
-                    .ConfigureAwait(false);
-
-                // Query status out of band so one slow device does not stall
-                // discovery of the rest.
-                _ = Task.Run(async () =>
+                await foreach (var lanDevice in client.Discovered.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    try
+                    log.LogTrace("LAN disco: {Sku} {Device} at {Ip}", lanDevice.Sku, lanDevice.Device, lanDevice.Ip);
+
+                    await app.State.UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device, d => d.SetLanDevice(lanDevice))
+                        .ConfigureAwait(false);
+
+                    // Query status out of band so one slow device does not stall
+                    // discovery of the rest.
+                    _ = Task.Run(async () =>
                     {
-                        var status = await client.QueryStatusAsync(lanDevice, cancellationToken).ConfigureAwait(false);
-                        await app.State.UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device,
-                            d => d.SetLanDeviceStatus(status)).ConfigureAwait(false);
-                        await app.State.NotifyOfStateChangeAsync(lanDevice.Device, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        log.LogTrace("LAN status query for {Device} failed: {Message}", lanDevice.Device, ex.Message);
-                    }
-                }, CancellationToken.None);
+                        try
+                        {
+                            var status = await client.QueryStatusAsync(lanDevice, cancellationToken).ConfigureAwait(false);
+
+                            var changed = false;
+                            await app.State.UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device,
+                                d => changed = d.SetLanDeviceStatus(status)).ConfigureAwait(false);
+
+                            // Devices answer every discovery round; only tell Home
+                            // Assistant when the answer differs from last time.
+                            await app.State.NotifyOfStateChangeAsync(lanDevice.Device, changed, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Shutting down.
+                        }
+                        catch (Exception ex)
+                        {
+                            log.LogTrace("LAN status query for {Device} failed: {Message}", lanDevice.Device, ex.Message);
+                        }
+                    }, CancellationToken.None);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutting down.
             }
         }, CancellationToken.None);
 
@@ -385,12 +375,17 @@ public static class ServeCommand
 
         var needsPlatform = device.NeedsPlatformPoll();
 
-        // A LAN device that has gone stale is almost certainly offline, and
-        // burning Platform API quota on it will not help.
+        // A LAN device that has gone stale is probably offline, in which case
+        // the cloud will not know any better. Still ask, but only hourly, so a
+        // device whose LAN path broke is not left reporting stale state
+        // forever while the Platform API quota is spared.
         if (device.LanDevice is not null && !needsPlatform)
         {
-            log.LogTrace("LAN-available device {Device} needs a status update; it's likely offline.", device);
-            return;
+            if (device.LastPolled is { } polled && now - polled < TimeSpan.FromHours(1))
+            {
+                return;
+            }
+            log.LogDebug("LAN device {Device} has gone quiet; asking the cloud APIs instead", device);
         }
 
         if (!needsPlatform && await state.PollIotApiAsync(device, cancellationToken).ConfigureAwait(false))

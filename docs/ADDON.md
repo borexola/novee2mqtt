@@ -8,7 +8,7 @@ Container, use [Docker](DOCKER.md) instead — add-ons are not available there.
 1. In Home Assistant, go to **Settings → Add-ons → Add-on Store**.
 2. From the ⋮ menu, choose **Repositories**.
 3. Add `https://github.com/borexola/Novee2Mqtt` and close the dialog.
-4. Find **Govee to MQTT Bridge (.NET)** in the store and click **Install**.
+4. Find **Novee2Mqtt** in the store and click **Install**.
 
 The add-on declares `mqtt:need`, so Home Assistant will not let it start until
 you have the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/)

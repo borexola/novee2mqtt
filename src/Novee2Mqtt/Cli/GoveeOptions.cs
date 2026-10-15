@@ -247,16 +247,27 @@ public sealed class ArgParser(IReadOnlyList<string> args)
             }
         }
 
+        // The environment goes on first so that the flags below win over it;
+        // the nullable settings in the initializer above are only filled in by
+        // the environment where the flag was absent.
+        options.ApplyEnvironment();
+
         if (GetInt("disco-timeout") is { } discoTimeout) options.DiscoTimeout = discoTimeout;
         if (GetInt("mqtt-port") is { } mqttPort) options.MqttPort = mqttPort;
         if (GetInt("http-port") is { } httpPort) options.HttpPort = httpPort;
         if (GetString("hass-discovery-prefix") is { } prefix) options.HassDiscoveryPrefix = prefix;
         if (GetString("temperature-scale") is { } scale) options.TemperatureScale = TemperatureExtensions.ParseScale(scale);
 
-        options.ApplyEnvironment();
-
         // Default to the copy shipped next to the binary.
         options.AmazonRootCa ??= Path.Combine(AppContext.BaseDirectory, "AmazonRootCA1.pem");
+
+        if (options.Email is null != (options.Password is null))
+        {
+            // Half an account is silently no account at all, which is a
+            // confusing way to lose rooms, IoT and Tap-to-Run.
+            Console.Error.WriteLine(
+                "Warning: only one of the Govee email and password is set; both are needed, so the Govee account is not used.");
+        }
 
         return options;
     }

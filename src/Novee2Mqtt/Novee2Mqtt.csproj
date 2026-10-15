@@ -5,8 +5,6 @@
     <AssemblyName>novee2mqtt</AssemblyName>
     <RootNamespace>Novee2Mqtt</RootNamespace>
     <UserSecretsId>novee2mqtt</UserSecretsId>
-    <!-- The web SDK would otherwise try to serve ./wwwroot; we serve ./assets ourselves. -->
-    <DisableImplicitFrameworkReferences>false</DisableImplicitFrameworkReferences>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>

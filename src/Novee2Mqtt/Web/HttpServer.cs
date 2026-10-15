@@ -23,6 +23,13 @@ public static class HttpServer
 {
     private static readonly DateTimeOffset StartedAt = DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// Control endpoints accept GET so a wall panel or a browser bookmark can
+    /// drive them, and POST so scripts that care about not having side effects
+    /// on GET have a proper verb to use.
+    /// </summary>
+    private static readonly string[] GetOrPost = ["GET", "POST"];
+
     /// <summary>Matches the options configured on the host, for hand-rolled writes such as SSE.</summary>
     private static readonly JsonSerializerOptions ApiJson = new()
     {
@@ -118,14 +125,14 @@ public static class HttpServer
                 : Results.Json(item, ApiJson);
         });
 
-        app.MapGet("/api/device/{id}/power/on", (string id) =>
+        app.MapMethods("/api/device/{id}/power/on", GetOrPost, (string id) =>
             ControlAsync(state, id, (s, d, ct) => s.DevicePowerOnAsync(d, true, ct)));
 
-        app.MapGet("/api/device/{id}/power/off", (string id) =>
+        app.MapMethods("/api/device/{id}/power/off", GetOrPost, (string id) =>
             ControlAsync(state, id, (s, d, ct) => s.DevicePowerOnAsync(d, false, ct)));
 
         // Convenience for wall panels and scripts that do not track state themselves.
-        app.MapGet("/api/device/{id}/toggle", async (string id) =>
+        app.MapMethods("/api/device/{id}/toggle", GetOrPost, async (string id) =>
         {
             var device = await state.ResolveDeviceAsync(id).ConfigureAwait(false);
             if (device is null)
@@ -137,14 +144,14 @@ public static class HttpServer
             return await ControlAsync(state, id, (s, d, ct) => s.DevicePowerOnAsync(d, !on, ct)).ConfigureAwait(false);
         });
 
-        app.MapGet("/api/device/{id}/brightness/{level:int}", (string id, int level) =>
+        app.MapMethods("/api/device/{id}/brightness/{level:int}", GetOrPost, (string id, int level) =>
             ControlAsync(state, id, (s, d, ct) =>
                 s.DeviceSetBrightnessAsync(d, (byte)Math.Clamp(level, 0, 100), ct)));
 
-        app.MapGet("/api/device/{id}/colortemp/{kelvin:int}", (string id, int kelvin) =>
+        app.MapMethods("/api/device/{id}/colortemp/{kelvin:int}", GetOrPost, (string id, int kelvin) =>
             ControlAsync(state, id, (s, d, ct) => s.DeviceSetColorTemperatureAsync(d, kelvin, ct)));
 
-        app.MapGet("/api/device/{id}/color/{color}", (string id, string color) =>
+        app.MapMethods("/api/device/{id}/color/{color}", GetOrPost, (string id, string color) =>
         {
             if (!CssColor.TryParse(color, out var parsed))
             {
@@ -153,7 +160,7 @@ public static class HttpServer
             return ControlAsync(state, id, (s, d, ct) => s.DeviceSetColorRgbAsync(d, parsed, ct));
         });
 
-        app.MapGet("/api/device/{id}/scene/{scene}", (string id, string scene) =>
+        app.MapMethods("/api/device/{id}/scene/{scene}", GetOrPost, (string id, string scene) =>
             ControlAsync(state, id, (s, d, ct) => s.DeviceSetSceneAsync(d, scene, ct)));
 
         app.MapGet("/api/device/{id}/scenes", async (string id) =>
@@ -194,7 +201,7 @@ public static class HttpServer
             }
         });
 
-        app.MapGet("/api/oneclick/activate/{name}", async (string name) =>
+        app.MapMethods("/api/oneclick/activate/{name}", GetOrPost, async (string name) =>
         {
             if (state.UndocClient is not { } undoc)
             {
@@ -255,7 +262,7 @@ public static class HttpServer
             return Results.Json(rooms, ApiJson);
         });
 
-        app.MapGet("/api/room/{room}/power/{power}", async (string room, string power) =>
+        app.MapMethods("/api/room/{room}/power/{power}", GetOrPost, async (string room, string power) =>
         {
             if (power is not ("on" or "off"))
             {

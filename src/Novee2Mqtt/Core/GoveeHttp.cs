@@ -4,9 +4,17 @@ using System.Text.Json.Nodes;
 namespace Novee2Mqtt.Core;
 
 /// <summary>Thrown when a Govee endpoint reports failure, carrying the HTTP status for retry decisions.</summary>
-public sealed class HttpRequestFailedException(HttpStatusCode status, string message) : GoveeException(message)
+public sealed class HttpRequestFailedException(HttpStatusCode status, string message, TimeSpan? retryAfter = null)
+    : GoveeException(message)
 {
     public HttpStatusCode Status { get; } = status;
+
+    /// <summary>The server's <c>Retry-After</c>, when it sent one.</summary>
+    public TimeSpan? RetryAfter { get; } = retryAfter;
+
+    public bool IsRateLimited => Status == HttpStatusCode.TooManyRequests;
+
+    public bool IsServerError => (int)Status >= 500;
 }
 
 public static class GoveeHttp
@@ -25,7 +33,8 @@ public static class GoveeHttp
         {
             throw new HttpRequestFailedException(
                 response.StatusCode,
-                $"request {url} status {(int)response.StatusCode}: {response.ReasonPhrase}. Response body: {Truncate(body)}");
+                $"request {url} status {(int)response.StatusCode}: {response.ReasonPhrase}. Response body: {Truncate(body)}",
+                RetryAfter(response));
         }
 
         if (TryGetEmbeddedStatus(body, out var embeddedStatus, out var embeddedMessage) && embeddedStatus != 200)
@@ -36,10 +45,25 @@ public static class GoveeHttp
 
             throw new HttpRequestFailedException(
                 status,
-                $"Request to {url} failed with code {embeddedStatus} {embeddedMessage}. Full response: {Truncate(body)}");
+                $"Request to {url} failed with code {embeddedStatus} {embeddedMessage}. Full response: {Truncate(body)}",
+                RetryAfter(response));
         }
 
         return Json.Deserialize<T>(body);
+    }
+
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var header = response.Headers.RetryAfter;
+        if (header?.Delta is { } delta)
+        {
+            return delta;
+        }
+        if (header?.Date is { } date)
+        {
+            return date - DateTimeOffset.UtcNow;
+        }
+        return null;
     }
 
     private static bool TryGetEmbeddedStatus(string body, out int status, out string message)

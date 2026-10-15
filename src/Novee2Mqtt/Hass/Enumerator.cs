@@ -57,7 +57,24 @@ public sealed class EntityEnumerator(ILogger<EntityEnumerator> log, ServiceState
         return entities;
     }
 
+    /// <summary>Adds the device's entities, each tagged with the device id it belongs to.</summary>
     private async Task AddDeviceEntitiesAsync(Device device, List<HassEntity> entities, CancellationToken cancellationToken)
+    {
+        var first = entities.Count;
+        try
+        {
+            await AddDeviceEntitiesCoreAsync(device, entities, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            for (var i = first; i < entities.Count; i++)
+            {
+                entities[i].DeviceId = device.Id;
+            }
+        }
+    }
+
+    private async Task AddDeviceEntitiesCoreAsync(Device device, List<HassEntity> entities, CancellationToken cancellationToken)
     {
         if (!device.IsControllable())
         {

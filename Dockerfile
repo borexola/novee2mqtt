@@ -70,9 +70,11 @@ ENV GOVEE_CACHE_DIR=/data \
 
 VOLUME /data
 
-# The chiseled image has no shell and no curl, so the app probes itself.
+# The chiseled image has no shell and no curl, so the app probes itself. Each
+# probe is a second .NET process, so it runs every two minutes rather than
+# every one; with three retries that still flags a dead bridge within ten.
 # start-period covers the ~15s LAN discovery wait during startup.
-HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=120s --timeout=10s --start-period=60s --retries=3 \
     CMD ["/app/novee2mqtt", "health"]
 
 # Web UI and REST API. LAN discovery additionally needs UDP 4002 on the host,

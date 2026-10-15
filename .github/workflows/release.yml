@@ -34,6 +34,18 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The Supervisor installs the add-on at the version written in
+      # addon/config.yaml and pulls the image tagged with it. A release whose
+      # tag disagrees with that file would publish images nobody can install,
+      # so refuse it here rather than find out from a user.
+      - name: Check the add-on version matches
+        run: |
+          configured=$(sed -nE 's/^version: *"?([^"]*)"?$/\1/p' addon/config.yaml)
+          if [ "$configured" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::addon/config.yaml declares version '$configured' but this release is '${{ steps.version.outputs.version }}'. Bump addon/config.yaml before tagging."
+            exit 1
+          fi
+
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
@@ -87,7 +99,7 @@ jobs:
       # The Home Assistant builder wraps the application image, which is why it
       # runs only after app-image has pushed.
       - name: Build add-on
-        uses: home-assistant/builder@master
+        uses: home-assistant/builder@2026.09.0
         with:
           args: |
             --${{ matrix.arch }} \

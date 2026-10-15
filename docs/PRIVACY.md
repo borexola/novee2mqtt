@@ -29,6 +29,15 @@ Your password itself is never written to disk. The cached tokens are as sensitiv
 as the password, though, so treat the cache volume accordingly. Deleting it is
 always safe — the bridge refetches everything.
 
+## The HTTP API
+
+The control panel and REST API on port 8056 have no authentication: anyone who
+can reach the port can read device state and switch devices. The control
+endpoints also answer plain `GET` requests, which means a web page you visit
+could trigger one through an image link. Keep the port on your home network and
+do not expose it to the internet; put a reverse proxy with authentication in
+front of it if you need remote access.
+
 ## Logging
 
 Your password, account token and the IoT key material are never logged.

@@ -27,7 +27,10 @@ public sealed class SceneCatalog(ILogger<SceneCatalog> log, HttpClient httpClien
             Key: $"scenes-{sku}",
             SoftTtl: TimeSpan.FromDays(1),
             HardTtl: TimeSpan.FromDays(7),
-            NegativeTtl: TimeSpan.FromSeconds(1),
+            // Long enough that a LAN-only install with no internet route does
+            // not re-attempt this fetch, with its 10 second timeout, on every
+            // state change.
+            NegativeTtl: TimeSpan.FromMinutes(5),
             AllowStale: true);
 
         return await cache.GetAsync(options, async ct =>

@@ -15,6 +15,7 @@ public sealed class MqttConnection(ILogger log, string name, MqttClientOptions o
 {
     private readonly IMqttClient _client = new MqttClientFactory().CreateMqttClient();
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly OrderedDispatcher _dispatcher = new();
     private Task? _supervisor;
 
     /// <summary>Runs after every reconnect, to re-subscribe and re-announce.</summary>
@@ -43,17 +44,23 @@ public sealed class MqttConnection(ILogger log, string name, MqttClientOptions o
             var payload = Encoding.UTF8.GetString(BuffersExtensions.ToArray(args.ApplicationMessage.Payload));
             log.LogTrace("{Name} {Topic} -> {Payload}", name, Show(topic), payload);
 
-            // Handlers can block for seconds while talking to a device; do not
-            // hold up the receive loop for that.
+            // Handlers can block for seconds while talking to a device, so the
+            // receive loop must not wait for them. Messages on the same topic
+            // still run in the order they arrived: an ON followed by an OFF for
+            // one light, or two IoT status packets, must not be applied swapped.
             if (OnMessage is { } handler)
             {
-                _ = Task.Run(async () =>
+                _dispatcher.Enqueue(topic, async () =>
                 {
                     try
                     {
                         await handler(topic, payload, _shutdown.Token).ConfigureAwait(false);
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    catch (OperationCanceledException)
+                    {
+                        // Shutting down.
+                    }
+                    catch (Exception ex)
                     {
                         log.LogError("{Name} handling {Topic}: {Message}", name, Show(topic), ex.Message);
                     }
@@ -180,5 +187,63 @@ public sealed class MqttConnection(ILogger log, string name, MqttClientOptions o
 
         _client.Dispose();
         _shutdown.Dispose();
+    }
+}
+
+/// <summary>
+/// Runs work items in the background, serialized per key but concurrent across
+/// keys. Each key holds the tail of its chain; a new item continues from that
+/// tail, and the entry is dropped once the chain has drained.
+/// </summary>
+public sealed class OrderedDispatcher
+{
+    private readonly Dictionary<string, Task> _tails = new(StringComparer.Ordinal);
+    private readonly object _lock = new();
+
+    /// <summary>Items waiting or running, across all keys. For tests and diagnostics.</summary>
+    public int PendingKeys
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _tails.Count;
+            }
+        }
+    }
+
+    public void Enqueue(string key, Func<Task> work)
+    {
+        lock (_lock)
+        {
+            var previous = _tails.TryGetValue(key, out var tail) ? tail : Task.CompletedTask;
+
+            // ContinueWith rather than await: the chain must advance even if an
+            // earlier item faulted, and the work itself catches its own errors.
+            // Not ExecuteSynchronously: the first item of a chain would otherwise
+            // start on the caller's thread, inside this lock.
+            var next = previous.ContinueWith(
+                _ => work(),
+                CancellationToken.None,
+                TaskContinuationOptions.None,
+                TaskScheduler.Default).Unwrap();
+
+            _tails[key] = next;
+
+            next.ContinueWith(
+                finished =>
+                {
+                    lock (_lock)
+                    {
+                        if (_tails.TryGetValue(key, out var current) && ReferenceEquals(current, finished))
+                        {
+                            _tails.Remove(key);
+                        }
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
     }
 }

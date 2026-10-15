@@ -38,7 +38,14 @@ public sealed class GoveeApp : IDisposable
     {
         var loggerFactory = CreateLoggerFactory();
 
-        var httpClient = new HttpClient
+        var httpClient = new HttpClient(new SocketsHttpHandler
+        {
+            // Recycle pooled connections so that DNS changes at Govee and AWS
+            // are picked up by a process that runs for weeks.
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            // The device list in particular is large and compresses well.
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+        })
         {
             // Individual calls apply their own, shorter, deadlines.
             Timeout = TimeSpan.FromSeconds(120),

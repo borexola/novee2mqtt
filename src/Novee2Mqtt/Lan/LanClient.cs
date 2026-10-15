@@ -33,6 +33,14 @@ public sealed class LanClient : IAsyncDisposable
     private readonly ILogger<LanClient> _log;
     private readonly DiscoOptions _options;
     private readonly UdpClient _listener;
+
+    /// <summary>
+    /// One socket for every outbound packet. Devices always reply to port 4002
+    /// rather than to the source port, so the sender needs no particular
+    /// binding, and reusing it avoids opening a socket per discovery packet.
+    /// </summary>
+    private readonly UdpClient _sender;
+
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Channel<LanDevice> _discovered = Channel.CreateUnbounded<LanDevice>();
     private readonly List<ResponseListener> _listeners = [];
@@ -45,6 +53,11 @@ public sealed class LanClient : IAsyncDisposable
         _log = log;
         _options = options;
         _listener = listener;
+        _sender = new UdpClient(new IPEndPoint(IPAddress.Any, 0))
+        {
+            EnableBroadcast = true,
+            MulticastLoopback = false,
+        };
     }
 
     /// <summary>Devices as they are discovered. Never completes while the client is alive.</summary>
@@ -108,7 +121,19 @@ public sealed class LanClient : IAsyncDisposable
         var text = Encoding.UTF8.GetString(received.Buffer);
         _log.LogTrace("LAN packet from {Address}: {Payload}", received.RemoteEndPoint.Address, text);
 
-        var envelope = Json.Deserialize<LanResponseEnvelope>(text);
+        LanResponseEnvelope envelope;
+        try
+        {
+            envelope = Json.Deserialize<LanResponseEnvelope>(text);
+        }
+        catch (GoveeException ex)
+        {
+            // Port 4002 is a well-known port; anything on the LAN may send
+            // noise to it, and that is not worth an error line each time.
+            _log.LogDebug("Ignoring unparseable LAN packet from {Address}: {Message}", received.RemoteEndPoint.Address, ex.Message);
+            return;
+        }
+
         if (envelope.Msg is null)
         {
             return;
@@ -278,38 +303,17 @@ public sealed class LanClient : IAsyncDisposable
 
     private async Task SendToAsync(IPAddress address, int port, byte[] payload, CancellationToken cancellationToken)
     {
-        using var socket = new UdpClient(address.AddressFamily);
+        var endpoint = new IPEndPoint(address, port);
 
-        if (IsMulticast(address))
+        if (address.AddressFamily == AddressFamily.InterNetwork)
         {
-            socket.MulticastLoopback = false;
-            try
-            {
-                socket.JoinMulticastGroup(address);
-            }
-            catch (SocketException ex)
-            {
-                // Joining is not required in order to send; on some hosts it fails
-                // when no interface is explicitly bound.
-                _log.LogTrace("JoinMulticastGroup({Address}) failed: {Message}", address, ex.Message);
-            }
-        }
-        else
-        {
-            socket.EnableBroadcast = true;
+            await _sender.SendAsync(payload, endpoint, cancellationToken).ConfigureAwait(false);
+            return;
         }
 
-        await socket.SendAsync(payload, new IPEndPoint(address, port), cancellationToken).ConfigureAwait(false);
-    }
-
-    private static bool IsMulticast(IPAddress address)
-    {
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            return address.IsIPv6Multicast;
-        }
-        var first = address.GetAddressBytes()[0];
-        return first is >= 224 and <= 239;
+        // The protocol is IPv4 only in practice; anything else gets a throwaway socket.
+        using var socket = new UdpClient(address.AddressFamily) { EnableBroadcast = true };
+        await socket.SendAsync(payload, endpoint, cancellationToken).ConfigureAwait(false);
     }
 
     public Task SendRequestAsync(IPAddress address, string cmd, JsonNode data, CancellationToken cancellationToken = default)
@@ -475,6 +479,7 @@ public sealed class LanClient : IAsyncDisposable
     {
         await _shutdown.CancelAsync().ConfigureAwait(false);
         _listener.Dispose();
+        _sender.Dispose();
 
         foreach (var task in new[] { _receiveLoop, _discoveryLoop })
         {

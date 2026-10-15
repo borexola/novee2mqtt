@@ -132,28 +132,83 @@ public class PlatformRequestTests : IDisposable
         Assert.Contains("unauthorized", ex.Message);
     }
 
+    /// <summary>A 429 pauses every further call until Govee's Retry-After has passed.</summary>
+    [Fact]
+    public async Task RateLimitResponsePausesFurtherCalls()
+    {
+        _handler.RespondWith(HttpStatusCode.TooManyRequests, """{"code":429,"msg":"too many requests"}""",
+            retryAfter: TimeSpan.FromSeconds(30));
+
+        await Assert.ThrowsAsync<HttpRequestFailedException>(() => _client.GetDeviceStateAsync(Device()));
+        Assert.NotNull(_client.ThrottledUntil);
+
+        var ex = await Assert.ThrowsAsync<GoveeException>(() => _client.GetDeviceStateAsync(Device()));
+
+        Assert.Contains("rate limited", ex.Message);
+        Assert.Equal(1, _handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ServerErrorIsRetriedOnce()
+    {
+        _handler.Enqueue(HttpStatusCode.BadGateway, "upstream unavailable");
+        _handler.RespondWith("""{"requestId":"x","code":200,"msg":"ok","payload":{"sku":"H6072","device":"AA:BB","capabilities":[]}}""");
+
+        var state = await _client.GetDeviceStateAsync(Device());
+
+        Assert.Equal("H6072", state.Sku);
+        Assert.Equal(2, _handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ServerErrorIsNotRetriedTwice()
+    {
+        _handler.Enqueue(HttpStatusCode.BadGateway, "first");
+        _handler.Enqueue(HttpStatusCode.BadGateway, "second");
+
+        await Assert.ThrowsAsync<HttpRequestFailedException>(() => _client.GetDeviceStateAsync(Device()));
+
+        Assert.Equal(2, _handler.RequestCount);
+    }
+
     private sealed class RecordingHandler : HttpMessageHandler
     {
-        private string _response = "{}";
+        private readonly Queue<(HttpStatusCode Status, string Body, TimeSpan? RetryAfter)> _queued = new();
+        private (HttpStatusCode Status, string Body, TimeSpan? RetryAfter) _default = (HttpStatusCode.OK, "{}", null);
 
         public HttpRequestMessage? LastRequest { get; private set; }
         public string? LastBody { get; private set; }
+        public int RequestCount { get; private set; }
 
-        public void RespondWith(string json) => _response = json;
+        public void RespondWith(string json) => RespondWith(HttpStatusCode.OK, json);
+
+        public void RespondWith(HttpStatusCode status, string json, TimeSpan? retryAfter = null)
+            => _default = (status, json, retryAfter);
+
+        /// <summary>One-off responses consumed in order before the default applies.</summary>
+        public void Enqueue(HttpStatusCode status, string json) => _queued.Enqueue((status, json, null));
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            RequestCount++;
             LastRequest = request;
             LastBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            var (status, body, retryAfter) = _queued.Count > 0 ? _queued.Dequeue() : _default;
+
+            var response = new HttpResponseMessage(status)
             {
-                Content = new StringContent(_response, Encoding.UTF8, "application/json"),
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
                 RequestMessage = request,
             };
+            if (retryAfter is { } delta)
+            {
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(delta);
+            }
+            return response;
         }
     }
 }

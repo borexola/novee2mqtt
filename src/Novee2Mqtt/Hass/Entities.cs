@@ -18,6 +18,12 @@ public sealed class HassEntity
     public required string UniqueId { get; init; }
     public required JsonObject Config { get; init; }
 
+    /// <summary>
+    /// The device this entity belongs to, or null for the bridge's own global
+    /// entities. Lets a state change republish just that device's entities.
+    /// </summary>
+    public string? DeviceId { get; set; }
+
     /// <summary>Null for entities that have no state, such as buttons and scenes.</summary>
     public Func<HassClient, CancellationToken, Task>? PublishState { get; init; }
 
@@ -283,7 +289,7 @@ public static class Entities
                 {
                     await client.PublishAsync(stateTopic, number != 0 ? "ON" : "OFF", ct).ConfigureAwait(false);
                 }
-                else if (value.AsString() != "")
+                else if (value is not null && value.AsString() != "")
                 {
                     log.LogWarning("Unhandled switch state for {Device} {Instance}: {State}",
                         d, instance, reported.State?.ToJsonString());
@@ -414,7 +420,12 @@ public static class Entities
                         ? (quirk?.PlatformHumiditySensorUnits ?? HumidityUnits.RelativePercent)
                             .ToRelativePercent(h).ToString("F2", CultureInfo.InvariantCulture)
                         : "",
-                    _ => reported.State?.ToJsonString() ?? "",
+                    // A scalar value is published bare, so "Connected to Govee
+                    // Cloud" reads "true" rather than a JSON object. Anything
+                    // more structured is passed through verbatim.
+                    _ => raw is JsonValue scalar
+                        ? scalar.TryGetValue<string>(out var text) ? text : scalar.ToJsonString()
+                        : reported.State?.ToJsonString() ?? "",
                 };
 
                 return client.PublishAsync(stateTopic, value, ct);
@@ -453,20 +464,45 @@ public static class Entities
 
                 await client.PublishAsync(stateTopic, summary, ct).ConfigureAwait(false);
 
-                await client.PublishAsync(attributesTopic, new JsonObject
+                // Home Assistant records a new state row whenever the attributes
+                // differ, and the timestamps in here differ on every poll. Only
+                // republish when something of substance changed, otherwise each
+                // LAN device would add a row to the recorder every minute. The
+                // static platform metadata is left out for the same reason; the
+                // `http-control --id <id> info` command shows it on demand.
+                var attributes = new JsonObject
                 {
                     ["iot"] = ToNode(d.ComputeIotDeviceState()),
                     ["lan"] = ToNode(d.ComputeLanDeviceState()),
                     ["http"] = ToNode(d.ComputeHttpDeviceState()),
-                    ["platform_metadata"] = ToNode(d.HttpDeviceInfo),
                     ["platform_state"] = ToNode(d.HttpDeviceState),
                     ["overall"] = ToNode(deviceState),
-                }, ct).ConfigureAwait(false);
+                };
+
+                await client.PublishIfChangedAsync(attributesTopic, attributes, StatusAttributeSignature(attributes), ct)
+                    .ConfigureAwait(false);
             }),
         };
 
         static JsonNode? ToNode<T>(T? value)
             => value is null ? null : JsonSerializer.SerializeToNode(value, Json.Options);
+    }
+
+    /// <summary>
+    /// The status attributes with their <c>updated</c> timestamps removed, so
+    /// two equal signatures mean nothing worth storing has changed.
+    /// </summary>
+    internal static string StatusAttributeSignature(JsonObject attributes)
+    {
+        var copy = (JsonObject)attributes.DeepClone();
+        foreach (var (_, value) in copy)
+        {
+            if (value is JsonObject source)
+            {
+                source.Remove("updated");
+            }
+        }
+        return copy.ToJsonString();
     }
 
     // ----------------------------------------------------------------- numbers

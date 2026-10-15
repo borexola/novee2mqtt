@@ -174,6 +174,13 @@ dotnet test
 docker build -t novee2mqtt:local .
 ```
 
+## Releasing
+
+The add-on is installed at the version written in `addon/config.yaml`, and the
+Supervisor pulls the image tagged with that version. To release, bump that file,
+commit, then tag the commit `v<version>`. The release workflow refuses a tag that
+disagrees with the file.
+
 ## Licence and credits
 
 MIT. See [LICENSE.md](LICENSE.md).

@@ -16,7 +16,7 @@ Bluetooth-only devices cannot be controlled: there is no BLE support. The bridge
 recognises the common BLE-only models and skips advertising them rather than
 creating entities that never work.
 
-Run `govee list` to see what was found and from where.
+Run `novee2mqtt list` to see what was found and from where.
 
 ## Nothing appears in Home Assistant
 
@@ -55,7 +55,8 @@ Without one, the bridge falls back to the app's scene catalog, which it can only
 apply to devices reachable over the LAN.
 
 If you have a key and scenes are still missing, press **Purge Caches** on the
-`Govee to MQTT` device — scene lists are cached for a week.
+`Govee to MQTT` device — scene lists are refreshed every six hours and kept for
+up to a week when Govee cannot be reached.
 
 ## A device shows the wrong state, or none at all
 
@@ -82,6 +83,11 @@ Each source is trusted only as far as it goes:
 
 Only for devices without LAN or IoT coverage. Those are polled, so it can take up
 to a poll interval. Press **Request Platform API State** if you need it sooner.
+
+## A device I added in the Govee app is missing
+
+The device lists are re-read from Govee once an hour, and new devices are then
+registered with Home Assistant. Restart the bridge if you do not want to wait.
 
 ## Turning off a light with segments turns it back on
 

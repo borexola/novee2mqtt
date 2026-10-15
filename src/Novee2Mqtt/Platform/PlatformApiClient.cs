@@ -1,4 +1,7 @@
+using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Novee2Mqtt.Core;
@@ -26,13 +29,38 @@ public sealed class PlatformApiClient(
     private static readonly TimeSpan OneWeek = TimeSpan.FromDays(7);
     private static readonly TimeSpan FiveMinutes = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Cache keys carry a fingerprint of the API key, so that switching to a
+    /// different Govee account does not keep serving the previous account's
+    /// device and scene lists until they expire.
+    /// </summary>
+    private readonly string _keyScope = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(apiKey)))[..12];
+
+    private readonly object _throttleLock = new();
+    private DateTimeOffset _throttledUntil = DateTimeOffset.MinValue;
+
     private static string Endpoint(string path) => Server + path;
+
+    /// <summary>
+    /// When Govee has told us to back off, calls made before that time fail
+    /// locally instead of spending another request on a 429.
+    /// </summary>
+    public DateTimeOffset? ThrottledUntil
+    {
+        get
+        {
+            lock (_throttleLock)
+            {
+                return _throttledUntil > DateTimeOffset.UtcNow ? _throttledUntil : null;
+            }
+        }
+    }
 
     public Task<List<HttpDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken = default)
     {
         var options = new CacheGetOptions(
             Topic: "http-api",
-            Key: "device-list",
+            Key: $"device-list-{_keyScope}",
             SoftTtl: TimeSpan.FromSeconds(900),
             HardTtl: OneWeek,
             NegativeTtl: TimeSpan.FromSeconds(60),
@@ -97,10 +125,10 @@ public sealed class PlatformApiClient(
     };
 
     public Task<List<DeviceCapability>> GetDeviceScenesAsync(HttpDeviceInfo device, CancellationToken cancellationToken = default)
-        => GetScenesAsync(device, "/router/api/v1/device/scenes", $"scene-list-{device.Sku}-{device.Device}", cancellationToken);
+        => GetScenesAsync(device, "/router/api/v1/device/scenes", $"scene-list-{device.Sku}-{device.Device}-{_keyScope}", cancellationToken);
 
     public Task<List<DeviceCapability>> GetDeviceDiyScenesAsync(HttpDeviceInfo device, CancellationToken cancellationToken = default)
-        => GetScenesAsync(device, "/router/api/v1/device/diy-scenes", $"scene-list-diy-{device.Sku}-{device.Device}", cancellationToken);
+        => GetScenesAsync(device, "/router/api/v1/device/diy-scenes", $"scene-list-diy-{device.Sku}-{device.Device}-{_keyScope}", cancellationToken);
 
     private Task<List<DeviceCapability>> GetScenesAsync(
         HttpDeviceInfo device,
@@ -116,7 +144,9 @@ public sealed class PlatformApiClient(
         var options = new CacheGetOptions(
             Topic: "http-api",
             Key: cacheKey,
-            SoftTtl: TimeSpan.FromSeconds(300),
+            // Scenes change rarely and each refresh costs two requests per
+            // device against a daily quota. "Purge Caches" forces a re-read.
+            SoftTtl: TimeSpan.FromHours(6),
             HardTtl: OneWeek,
             NegativeTtl: FiveMinutes,
             AllowStale: true);
@@ -405,29 +435,73 @@ public sealed class PlatformApiClient(
         }, cancellationToken);
     }
 
-    private async Task<TResponse> GetAsync<TResponse>(string url, CancellationToken cancellationToken)
+    private Task<TResponse> GetAsync<TResponse>(string url, CancellationToken cancellationToken)
+        => SendAsync<TResponse>(() => new HttpRequestMessage(HttpMethod.Get, url), cancellationToken);
+
+    private Task<TResponse> PostAsync<TResponse>(string url, object body, CancellationToken cancellationToken)
+        => SendAsync<TResponse>(() => new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = JsonContent.Create(body, options: Json.Options),
+        }, cancellationToken);
+
+    /// <summary>
+    /// Sends a request, honouring a 429 by refusing further calls until the
+    /// server's <c>Retry-After</c> has passed, and retrying a 5xx once.
+    /// </summary>
+    /// <param name="createRequest">
+    /// Builds the request; a fresh one is needed for the retry since a request
+    /// message cannot be sent twice.
+    /// </param>
+    private async Task<TResponse> SendAsync<TResponse>(Func<HttpRequestMessage> createRequest, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Govee-API-Key", apiKey);
+        if (ThrottledUntil is { } until)
+        {
+            throw new GoveeException($"Platform API is rate limited by Govee; retrying after {until:HH:mm:ss} UTC");
+        }
 
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(60));
+        for (var attempt = 1; ; attempt++)
+        {
+            using var request = createRequest();
+            request.Headers.TryAddWithoutValidation("Govee-API-Key", apiKey);
 
-        using var response = await httpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
-        return await GoveeHttp.ReadJsonAsync<TResponse>(response, cts.Token).ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(60));
+
+            try
+            {
+                using var response = await httpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
+                return await GoveeHttp.ReadJsonAsync<TResponse>(response, cts.Token).ConfigureAwait(false);
+            }
+            catch (HttpRequestFailedException ex) when (ex.IsRateLimited)
+            {
+                Throttle(ex.RetryAfter);
+                throw;
+            }
+            catch (HttpRequestFailedException ex) when (ex.IsServerError && attempt == 1)
+            {
+                var pause = TimeSpan.FromMilliseconds(1000 + Random.Shared.Next(1000));
+                log.LogWarning("Platform API returned {Status}; retrying once in {Pause}: {Message}",
+                    (int)ex.Status, pause, ex.Message);
+                await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
-    private async Task<TResponse> PostAsync<TResponse>(string url, object body, CancellationToken cancellationToken)
+    private void Throttle(TimeSpan? retryAfter)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, url);
-        request.Headers.TryAddWithoutValidation("Govee-API-Key", apiKey);
-        request.Content = JsonContent.Create(body, options: Json.Options);
+        // Govee rarely sends Retry-After; a minute is long enough to let a
+        // per-minute burst limit reset without hiding a daily-quota exhaustion
+        // for long, since the next call will simply be told again.
+        var pause = retryAfter ?? TimeSpan.FromMinutes(1);
+        if (pause < TimeSpan.FromSeconds(10)) pause = TimeSpan.FromSeconds(10);
+        if (pause > TimeSpan.FromHours(1)) pause = TimeSpan.FromHours(1);
 
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(60));
+        lock (_throttleLock)
+        {
+            _throttledUntil = DateTimeOffset.UtcNow + pause;
+        }
 
-        using var response = await httpClient.SendAsync(request, cts.Token).ConfigureAwait(false);
-        return await GoveeHttp.ReadJsonAsync<TResponse>(response, cts.Token).ConfigureAwait(false);
+        log.LogWarning("Platform API rate limit hit; pausing Platform API calls for {Pause}", pause);
     }
 }
 

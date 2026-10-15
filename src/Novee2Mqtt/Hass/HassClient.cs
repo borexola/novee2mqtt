@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -40,6 +41,22 @@ public sealed class HassClient : IAsyncDisposable
     private readonly EntityEnumerator _enumerator;
     private readonly GoveeCache _cache;
     private readonly MqttRouter _router = new();
+
+    /// <summary>
+    /// Each device's entities as advertised at the last registration. State
+    /// changes publish through these rather than re-enumerating, because
+    /// enumeration builds discovery configs and resolves effect lists, which
+    /// costs Platform API calls and, offline, HTTP timeouts.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, List<HassEntity>> _entitiesByDevice = new(StringComparer.Ordinal);
+
+    /// <summary>Signatures of the last attribute payload per topic; see <see cref="PublishIfChangedAsync"/>.</summary>
+    private readonly ConcurrentDictionary<string, string> _publishedSignatures = new(StringComparer.Ordinal);
+
+    /// <summary>Registration can be triggered by startup, a reconnect, HA's birth message and the purge button; never let two interleave.</summary>
+    private readonly SemaphoreSlim _registration = new(1, 1);
+
+    private volatile bool _registered;
 
     private HassClient(
         ILogger<HassClient> log,
@@ -110,6 +127,22 @@ public sealed class HassClient : IAsyncDisposable
     public Task PublishAsync(string topic, JsonNode payload, CancellationToken cancellationToken = default)
         => _connection.PublishAsync(topic, payload.ToJsonString(), cancellationToken);
 
+    /// <summary>
+    /// Publishes only when <paramref name="signature"/> differs from what was
+    /// last published to the topic. Used for attribute payloads, which Home
+    /// Assistant stores in full every time they change.
+    /// </summary>
+    public Task PublishIfChangedAsync(string topic, JsonNode payload, string signature, CancellationToken cancellationToken = default)
+    {
+        if (_publishedSignatures.TryGetValue(topic, out var previous) && previous == signature)
+        {
+            return Task.CompletedTask;
+        }
+
+        _publishedSignatures[topic] = signature;
+        return PublishAsync(topic, payload, cancellationToken);
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         try
@@ -168,37 +201,102 @@ public sealed class HassClient : IAsyncDisposable
     /// </summary>
     public async Task RegisterWithHassAsync(CancellationToken cancellationToken = default)
     {
-        var entities = await _enumerator.EnumerateAllAsync(cancellationToken).ConfigureAwait(false);
+        await _registration.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var entities = await _enumerator.EnumerateAllAsync(cancellationToken).ConfigureAwait(false);
 
-        _log.LogTrace("register_with_hass: registering {Count} entities", entities.Count);
+            _log.LogTrace("register_with_hass: registering {Count} entities", entities.Count);
 
+            // Home Assistant is starting from scratch, so attribute payloads must
+            // be sent in full again rather than suppressed as unchanged.
+            _publishedSignatures.Clear();
+
+            _entitiesByDevice.Clear();
+            foreach (var group in entities.Where(e => e.DeviceId is not null).GroupBy(e => e.DeviceId!, StringComparer.Ordinal))
+            {
+                _entitiesByDevice[group.Key] = group.ToList();
+            }
+
+            await PublishConfigsAsync(entities, cancellationToken).ConfigureAwait(false);
+
+            var settleDelay = TimeSpan.FromMilliseconds(10 * entities.Count);
+            _log.LogInformation("Waiting {Delay} for Home Assistant to settle on {Count} entity configs",
+                settleDelay, entities.Count);
+            await Task.Delay(settleDelay, cancellationToken).ConfigureAwait(false);
+
+            await PublishAsync(Topics.Availability, "online", cancellationToken).ConfigureAwait(false);
+
+            _registered = true;
+            await NotifyAllAsync(entities, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _registration.Release();
+        }
+    }
+
+    /// <summary>
+    /// Publishes discovery configs, spaced out because Home Assistant processes
+    /// them serially and drops them under load.
+    /// </summary>
+    private async Task PublishConfigsAsync(List<HassEntity> entities, CancellationToken cancellationToken)
+    {
         foreach (var entity in entities)
         {
             await PublishAsync(entity.DiscoveryTopic(_state.HassDiscoveryPrefix), entity.Config, cancellationToken)
                 .ConfigureAwait(false);
             await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
         }
-
-        var settleDelay = TimeSpan.FromMilliseconds(10 * entities.Count);
-        _log.LogInformation("Waiting {Delay} for Home Assistant to settle on {Count} entity configs",
-            settleDelay, entities.Count);
-        await Task.Delay(settleDelay, cancellationToken).ConfigureAwait(false);
-
-        await PublishAsync(Topics.Availability, "online", cancellationToken).ConfigureAwait(false);
-
-        await NotifyAllAsync(entities, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Republishes just one device's entity states, after a state change.</summary>
     public async Task AdviseHassOfDeviceStateAsync(Device device, CancellationToken cancellationToken = default)
     {
-        if (!_connection.IsConnected)
+        // Before the first registration there is nothing in Home Assistant to
+        // update; registration publishes every entity's state itself.
+        if (!_connection.IsConnected || !_registered)
         {
             return;
         }
 
-        var entities = await _enumerator.EnumerateForDeviceAsync(device, cancellationToken).ConfigureAwait(false);
+        if (!_entitiesByDevice.TryGetValue(device.Id, out var entities))
+        {
+            entities = await AdvertiseLateDeviceAsync(device, cancellationToken).ConfigureAwait(false);
+        }
+
         await NotifyAllAsync(entities, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A device that turned up after registration, typically a slow LAN reply.
+    /// Advertise it now rather than leaving it invisible until the next
+    /// Home Assistant restart.
+    /// </summary>
+    private async Task<List<HassEntity>> AdvertiseLateDeviceAsync(Device device, CancellationToken cancellationToken)
+    {
+        await _registration.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_entitiesByDevice.TryGetValue(device.Id, out var existing))
+            {
+                return existing;
+            }
+
+            var entities = await _enumerator.EnumerateForDeviceAsync(device, cancellationToken).ConfigureAwait(false);
+            if (entities.Count > 0)
+            {
+                _log.LogInformation("Advertising {Device} to Home Assistant: it appeared after registration", device);
+                await PublishConfigsAsync(entities, cancellationToken).ConfigureAwait(false);
+            }
+
+            _entitiesByDevice[device.Id] = entities;
+            return entities;
+        }
+        finally
+        {
+            _registration.Release();
+        }
     }
 
     private async Task NotifyAllAsync(List<HassEntity> entities, CancellationToken cancellationToken)
@@ -222,7 +320,9 @@ public sealed class HassClient : IAsyncDisposable
     {
         if (!await _router.DispatchAsync(topic, payload, cancellationToken).ConfigureAwait(false))
         {
-            _log.LogTrace("No route for {Topic}", topic);
+            // Debug rather than trace: a mistyped topic in an automation is the
+            // kind of thing someone needs to be able to see.
+            _log.LogDebug("No route for {Topic}", topic);
         }
     }
 
@@ -246,6 +346,13 @@ public sealed class HassClient : IAsyncDisposable
     /// <summary>Home Assistant restarted, so everything must be advertised again.</summary>
     private async Task OnHomeAssistantStatusAsync(RouteContext context, CancellationToken cancellationToken)
     {
+        if (!string.Equals(context.Payload.Trim(), "online", StringComparison.OrdinalIgnoreCase))
+        {
+            // "offline" is its last will; there is nobody to re-register with.
+            _log.LogInformation("Home Assistant status changed: {Status}", context.Payload);
+            return;
+        }
+
         _log.LogInformation(
             "Home Assistant status changed: {Status}, waiting {Delay} before re-registering entities",
             context.Payload, RegisterDelay);
@@ -523,6 +630,7 @@ public sealed class HassClient : IAsyncDisposable
         }
 
         await _connection.DisposeAsync().ConfigureAwait(false);
+        _registration.Dispose();
     }
 
     /// <summary>The JSON light schema payload Home Assistant sends.</summary>

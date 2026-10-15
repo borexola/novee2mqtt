@@ -1,4 +1,4 @@
-# Home Assistant Add-on: Govee to MQTT Bridge (.NET)
+# Home Assistant Add-on: Novee2Mqtt
 
 Brings your Govee devices into Home Assistant through the MQTT integration.
 
@@ -10,7 +10,7 @@ Platform API for scenes, segments and sensors.
 
 1. **Settings → Add-ons → Add-on Store**.
 2. ⋮ menu → **Repositories** → add `https://github.com/borexola/Novee2Mqtt`.
-3. Install **Govee to MQTT Bridge (.NET)**.
+3. Install **Novee2Mqtt**.
 4. Configure it, then start it.
 
 The [MQTT integration](https://www.home-assistant.io/integrations/mqtt/) must be

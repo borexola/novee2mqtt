@@ -36,17 +36,21 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
     // ---------------------------------------------------------------- registry
 
     /// <summary>Mutates the named device under the registry lock, creating it if needed.</summary>
-    public async Task UpdateDeviceAsync(string sku, string id, Action<Device> update)
+    /// <returns>True if the device was not known before this call.</returns>
+    public async Task<bool> UpdateDeviceAsync(string sku, string id, Action<Device> update)
     {
         await _devicesLock.WaitAsync().ConfigureAwait(false);
         try
         {
+            var created = false;
             if (!_devices.TryGetValue(id, out var device))
             {
                 device = new Device(sku, id);
                 _devices[id] = device;
+                created = true;
             }
             update(device);
+            return created;
         }
         finally
         {
@@ -223,13 +227,15 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
         }
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        var changed = false;
 
         while (DateTime.UtcNow <= deadline)
         {
             var status = await client.QueryStatusAsync(lanDevice, cancellationToken).ConfigureAwait(false);
             var satisfied = accepted(status);
 
-            await UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device, d => d.SetLanDeviceStatus(status)).ConfigureAwait(false);
+            await UpdateDeviceAsync(lanDevice.Sku, lanDevice.Device, d => changed |= d.SetLanDeviceStatus(status))
+                .ConfigureAwait(false);
 
             if (satisfied)
             {
@@ -239,7 +245,7 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
         }
 
-        await NotifyOfStateChangeAsync(lanDevice.Device, cancellationToken).ConfigureAwait(false);
+        await NotifyOfStateChangeAsync(lanDevice.Device, changed, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -488,6 +494,15 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
 
     public async Task DeviceSetSceneAsync(Device device, string scene, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrEmpty(scene))
+        {
+            // The blank entry in the effect list means "no scene". There is
+            // nothing to send, but stop reporting whichever scene was last set.
+            await UpdateDeviceAsync(device.Sku, device.Id, d => d.SetActiveScene(null)).ConfigureAwait(false);
+            await NotifyOfStateChangeAsync(device.Id, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (!device.AvoidPlatformApi() && PlatformClient is { } client && device.HttpDeviceInfo is { } info)
         {
             log.LogInformation("Using Platform API to set {Device} to scene {Scene}", device, scene);
@@ -625,11 +640,34 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             return;
         }
 
+        _lastNotified[deviceId] = DateTimeOffset.UtcNow;
+
         if (HassClient is { } hass)
         {
             await hass.AdviseHassOfDeviceStateAsync(device, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Republishes when the state actually changed, and otherwise only as an
+    /// occasional heartbeat. LAN devices answer discovery every minute whether
+    /// or not anything changed, and Home Assistant does not need to hear about
+    /// every one of those.
+    /// </summary>
+    public Task NotifyOfStateChangeAsync(string deviceId, bool changed, CancellationToken cancellationToken = default)
+    {
+        if (!changed
+            && _lastNotified.TryGetValue(deviceId, out var last)
+            && DateTimeOffset.UtcNow - last < HeartbeatInterval)
+        {
+            return Task.CompletedTask;
+        }
+
+        return NotifyOfStateChangeAsync(deviceId, cancellationToken);
+    }
+
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(5);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _lastNotified = new(StringComparer.Ordinal);
 }
 
 /// <summary>

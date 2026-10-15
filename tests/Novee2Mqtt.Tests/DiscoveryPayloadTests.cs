@@ -244,6 +244,64 @@ public class DiscoveryPayloadTests : IDisposable
         Assert.Equal("AWS IoT API", state.Source);
     }
 
+    /// <summary>
+    /// State changes republish through the entities cached per device, so each
+    /// entity must say which device it belongs to.
+    /// </summary>
+    [Fact]
+    public async Task DeviceEntitiesAreTaggedWithTheirDeviceId()
+    {
+        var entities = await _enumerator.EnumerateForDeviceAsync(await AddLightAsync());
+
+        Assert.NotEmpty(entities);
+        Assert.All(entities, e => Assert.Equal(LightId, e.DeviceId));
+    }
+
+    [Fact]
+    public async Task GlobalEntitiesHaveNoDeviceId()
+    {
+        await AddLightAsync();
+        var entities = await _enumerator.EnumerateAllAsync();
+
+        Assert.Null(entities.Single(e => e.UniqueId == "global-version").DeviceId);
+        Assert.Contains(entities, e => e.DeviceId == LightId);
+    }
+
+    /// <summary>The blank entry in the effect list means "no scene", not an error.</summary>
+    [Fact]
+    public async Task SelectingTheBlankEffectForgetsTheScene()
+    {
+        var device = await AddLightAsync();
+
+        await _state.UpdateDeviceAsync(device.Sku, device.Id, d =>
+        {
+            d.SetIotDeviceStatus(new LanDeviceStatus(true, 50, new DeviceColor(1, 2, 3), 0));
+            d.SetActiveScene("Sunset");
+        });
+        Assert.Equal("Sunset", (await _state.GetDeviceByIdAsync(device.Id))!.ComputeDeviceState()!.Scene);
+
+        await _state.DeviceSetSceneAsync(device, "");
+
+        Assert.Null((await _state.GetDeviceByIdAsync(device.Id))!.ComputeDeviceState()!.Scene);
+    }
+
+    [Fact]
+    public void StatusAttributeSignatureIgnoresTimestamps()
+    {
+        static JsonObject Attributes(bool on, string updated) => new()
+        {
+            ["lan"] = new JsonObject { ["on"] = on, ["updated"] = updated },
+            ["iot"] = null,
+        };
+
+        var first = Entities.StatusAttributeSignature(Attributes(true, "2026-01-01T00:00:00+00:00"));
+        var later = Entities.StatusAttributeSignature(Attributes(true, "2026-01-01T00:05:00+00:00"));
+        var changed = Entities.StatusAttributeSignature(Attributes(false, "2026-01-01T00:05:00+00:00"));
+
+        Assert.Equal(first, later);
+        Assert.NotEqual(first, changed);
+    }
+
     [Fact]
     public async Task NewerSourceWinsWhenMultipleApisReport()
     {

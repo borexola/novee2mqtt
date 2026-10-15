@@ -14,8 +14,6 @@ namespace Novee2Mqtt.Undocumented;
 /// </summary>
 public sealed class UndocumentedApiClient
 {
-    private const string HalfDayKey = "account-info";
-
     private static readonly TimeSpan HalfDay = TimeSpan.FromHours(12);
     private static readonly TimeSpan OneDay = TimeSpan.FromDays(1);
     private static readonly TimeSpan FifteenMinutes = TimeSpan.FromMinutes(15);
@@ -44,6 +42,14 @@ public sealed class UndocumentedApiClient
 
     public string ClientId => _clientId;
 
+    // Every cache key carries the client id, which is derived from the email,
+    // so a change of account does not keep serving the previous account's
+    // tokens, certificate and shortcuts until they expire.
+    private string AccountKey => $"account-info-{_clientId}";
+    private string IotKeyKey => $"iot-key-{_clientId}";
+    private string CommunityLoginKey => $"community-login-{_clientId}";
+    private string OneClickKey => $"one-click-shortcuts-{_clientId}";
+
     private void ApplyCommonHeaders(HttpRequestMessage request, string? bearerToken = null)
     {
         if (bearerToken is not null)
@@ -58,9 +64,9 @@ public sealed class UndocumentedApiClient
         request.Headers.UserAgent.ParseAdd(SceneCatalog.UserAgent);
     }
 
-    public void InvalidateAccountLogin() => _cache.Invalidate("undoc-api", HalfDayKey);
+    public void InvalidateAccountLogin() => _cache.Invalidate("undoc-api", AccountKey);
 
-    public void InvalidateCommunityLogin() => _cache.Invalidate("undoc-api", "community-login");
+    public void InvalidateCommunityLogin() => _cache.Invalidate("undoc-api", CommunityLoginKey);
 
     /// <summary>
     /// Logs in to the app API, caching the result for as long as the returned
@@ -70,7 +76,7 @@ public sealed class UndocumentedApiClient
     {
         var options = new CacheGetOptions(
             Topic: "undoc-api",
-            Key: HalfDayKey,
+            Key: AccountKey,
             SoftTtl: HalfDay,
             HardTtl: HalfDay,
             NegativeTtl: FifteenMinutes,
@@ -118,7 +124,7 @@ public sealed class UndocumentedApiClient
     {
         var options = new CacheGetOptions(
             Topic: "undoc-api",
-            Key: "iot-key",
+            Key: IotKeyKey,
             SoftTtl: HalfDay,
             HardTtl: HalfDay,
             NegativeTtl: TimeSpan.FromSeconds(10),
@@ -142,7 +148,7 @@ public sealed class UndocumentedApiClient
     {
         var options = new CacheGetOptions(
             Topic: "undoc-api",
-            Key: "community-login",
+            Key: CommunityLoginKey,
             SoftTtl: OneDay,
             HardTtl: HalfDay,
             NegativeTtl: TimeSpan.FromSeconds(10),
@@ -170,7 +176,7 @@ public sealed class UndocumentedApiClient
     {
         var options = new CacheGetOptions(
             Topic: "undoc-api",
-            Key: "one-click-shortcuts",
+            Key: OneClickKey,
             SoftTtl: OneDay,
             HardTtl: TimeSpan.FromDays(7),
             NegativeTtl: TimeSpan.FromSeconds(1),
