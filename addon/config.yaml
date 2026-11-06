@@ -16,6 +16,8 @@ startup: services
 services:
   - mqtt:need
 
+# Bluetooth goes through the host's BlueZ daemon over D-Bus, which the default
+# AppArmor profile refuses. apparmor.txt is that profile's rules plus BlueZ.
 apparmor: true
 
 webui: http://[HOST]:[PORT:8056]/

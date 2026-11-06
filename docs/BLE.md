@@ -17,8 +17,9 @@ writes the same 20-byte frames the app does.
   Assistant OS exposes the built-in or USB adapter of the machine it runs on.
   ESPHome Bluetooth proxies are not used: they are only reachable from Home
   Assistant's own Bluetooth stack, not from an add-on talking to BlueZ.
-* **BlueZ reachable over the system D-Bus.** The add-on asks for this itself
-  (`host_dbus`). In Docker, mounting the socket with
+* **BlueZ reachable over the system D-Bus.** The add-on sets this up itself: it
+  asks for `host_dbus`, and ships an AppArmor profile that allows BlueZ, because
+  the default profile refuses D-Bus calls. In Docker, mounting the socket with
   `-v /run/dbus:/run/dbus:ro` is not enough on its own. `dbus-daemon` closes the
   connection for a user it cannot look up, and the image's own user does not
   exist on the host. On hosts that enforce AppArmor, such as Ubuntu, Docker's
@@ -157,7 +158,8 @@ the light reports afterwards.
   (Docker), `host_dbus` is missing (an older add-on build), or the host has no
   bluetooth service running. `Connection closed by peer` or `AccessDenied` at
   the end of that message means D-Bus refused the container: see the Docker
-  notes at the top of this page.
+  notes at the top of this page. In the add-on it points at its AppArmor
+  profile: look for `apparmor="DENIED"` in the host log and report what it names.
 * **`No Bluetooth adapter is available to BlueZ`** — the host has no adapter,
   it is blocked by `rfkill`, or another process has claimed it exclusively.
 * **`is not advertising within Bluetooth range`** — the light is too far from

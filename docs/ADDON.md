@@ -56,8 +56,9 @@ panel stops working and only the direct address remains.
   Only one process on the host can bind UDP port 4002 — if you also run the
   `Govee LAN Control` integration, disable it.
 * The add-on also asks for access to the host's D-Bus, which is how it reaches
-  the Bluetooth adapter. Lights are only reachable over Bluetooth when they are
-  within range of the Home Assistant host itself; Bluetooth proxies are not used.
+  the Bluetooth adapter, and ships its own AppArmor profile to allow that. Lights
+  are only reachable over Bluetooth when they are within range of the Home
+  Assistant host itself; Bluetooth proxies are not used.
 * Cached device and scene metadata lives in the add-on's `/data` and survives
   restarts and updates.
 * MQTT topics and entity unique ids match the `govee2mqtt` bridge, so migrating
