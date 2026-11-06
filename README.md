@@ -159,6 +159,7 @@ work from a script, a wall panel or a Home Assistant `rest_command`.
 | `GET /api/room/{room}/power/{on\|off}` | Power every device in a room |
 | `GET /api/oneclicks` | Tap-to-Run shortcuts |
 | `POST /api/ble/scan` | Scan for Govee devices over Bluetooth and attach any found |
+| `GET /api/device/{id}/keep-connected/{on\|off}` | Hold a light's Bluetooth link open |
 | `GET /api/oneclick/activate/{name}` | Run a Tap-to-Run shortcut |
 | `POST /api/purge-caches` | Drop cached device data and re-register |
 | `GET /api/health` | Aggregate status; `503` when degraded |
@@ -219,8 +220,12 @@ copyright notice is retained in `LICENSE.md` as the MIT licence requires.
 
 The Bluetooth session, including the encrypted channel and the colour temperature
 tint table, follows [govee-ble-local](https://github.com/Brady-Woods/govee-ble-local)
-by Brady Woods, whose MIT notice is also in `LICENSE.md`. The captured frames come
-from [Govee-Reverse-Engineering](https://github.com/egold555/Govee-Reverse-Engineering)
+by Brady Woods, and the AES-GCM session follows
+[govee-homeassistant](https://github.com/lasswellt/govee-homeassistant) by Tom
+Lasswell and Florian Lagg. Their MIT notices are also in `LICENSE.md`. The test
+vectors for it come from
+[govee-bluetooth](https://github.com/Mezzle/govee-bluetooth), and the captured
+frames from [Govee-Reverse-Engineering](https://github.com/egold555/Govee-Reverse-Engineering)
 and its contributors.
 
 Written for this project: the control panel, the HTTP/REST API with its health,

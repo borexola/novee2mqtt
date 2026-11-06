@@ -183,7 +183,7 @@ public static class GoveeCli
               --ble-prefer               $GOVEE_BLE_PREFER   Try Bluetooth before the cloud APIs
               --ble-addresses <id=mac,…> $GOVEE_BLE_ADDRESSES  Device id to Bluetooth address overrides
                                          $GOVEE_BLE_PROFILE  Frame layout overrides, e.g. H66A1=0d
-                                         $GOVEE_BLE_IDLE_SECONDS  Keep a connection open this long, default 30
+                                         $GOVEE_BLE_IDLE_SECONDS  Keep a connection open this long, default 600
                                          $GOVEE_BLE_SCAN_SECONDS  Discovery scan length, default 15
 
             OTHER:

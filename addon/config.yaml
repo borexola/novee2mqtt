@@ -62,4 +62,5 @@ schema:
   bluetooth_prefer: "bool?"
   bluetooth_addresses: "str?"
   bluetooth_profile: "str?"
+  bluetooth_idle_seconds: "int?"
   http_port: "int?"

@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Bluetooth control now supports encrypt version 2, the AES-GCM session that
+  newer firmware such as the H66A1 uses.
+
+- A **Keep connected** switch on the card of any light reached over Bluetooth. The
+  bridge stays connected to that light, so commands run almost instantly, and
+  reconnects if the link drops. Hover over it for what it costs: the Govee app
+  cannot reach the light over Bluetooth while it is on.
+
+### Changed
+
+- Bluetooth connections now stay open for 10 minutes after the last command,
+  because connecting is what makes a command slow. New option
+  `bluetooth_idle_seconds` changes this. The Govee app cannot reach a light over
+  Bluetooth while the bridge holds it.
+
+### Fixed
+
+- After an update, a browser could reuse the old control panel page with the new
+  script, which left the panel stuck on `connecting`. Browsers now check for a
+  new page, and a stale page no longer stops the panel from starting.
+- Panel buttons could show a 504 error and flip back while a Bluetooth connection
+  was slow. The bridge now answers within 12 seconds, finishes the command in the
+  background, and the panel keeps showing what you pressed.
+- A failed Bluetooth command on a light the cloud reports offline showed the
+  cloud's "Device is offline" error instead of what actually went wrong.
+- Bluetooth names without a separator, such as `GVH6008979D`, were not recognised
+  as Govee devices, so those lights were missing from the scan.
+- The scan called lights on the LAN "not one of your account's devices".
+
 ## 0.0.4
 
 Controls lights that Govee's cloud cannot reach, over the Bluetooth adapter on

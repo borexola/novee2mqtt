@@ -28,7 +28,7 @@ set up first; the add-on will not start without a broker.
 | `debug_level` | `trace`, `debug`, `info`, `warn`, `error`. |
 | `no_multicast` / `broadcast_all` / `global_broadcast` / `scan` | LAN discovery tuning. |
 | `bluetooth` | `true` or `false`. Default: on when the host has a Bluetooth adapter. |
-| `bluetooth_adapter` / `bluetooth_prefer` / `bluetooth_addresses` / `bluetooth_profile` | Bluetooth tuning — see the docs. |
+| `bluetooth_adapter` / `bluetooth_prefer` / `bluetooth_addresses` / `bluetooth_profile` / `bluetooth_idle_seconds` | Bluetooth tuning — see the docs. |
 | `http_port` | Status page port. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Full documentation: <https://github.com/borexola/Novee2Mqtt/blob/main/docs/CONFIG.md>

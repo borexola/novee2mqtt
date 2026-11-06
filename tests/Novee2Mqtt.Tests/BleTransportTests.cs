@@ -1,6 +1,8 @@
+using Microsoft.AspNetCore.Http;
 using Novee2Mqtt.Ble;
 using Novee2Mqtt.Core;
 using Novee2Mqtt.Lan;
+using Novee2Mqtt.Web;
 
 namespace Novee2Mqtt.Tests;
 
@@ -179,6 +181,101 @@ public class BleTransportTests
         Assert.Equal(PacketManager.Checksum(request.AsSpan(0, 19)), request[19]);
     }
 
+    // A phone capture from a real H600B, published in
+    // egold555/Govee-Reverse-Engineering, the same protocol the H6008 speaks.
+    [Fact]
+    public void CapturedSessionFromARealBulbDecrypts()
+    {
+        var key = GoveeCipher.ParseSessionKey(Hex("9e6122db157166686c5d658a2de1cdfbc9202c8e"));
+        Assert.NotNull(key);
+
+        var session = new GoveeCipher(key);
+        var powerOff = Hex("3ced005c862462cb58c0fa5753826089c5128c78");
+        var red = Hex("9eea057b3a50524ada34503afca43690c5128c8e");
+
+        Assert.Equal(LightFrames.Power(false), session.Decrypt(powerOff));
+        Assert.Equal(powerOff, session.Wrap(LightFrames.Power(false)));
+        Assert.Equal(red, session.Wrap(LightFrames.ColorRgb(Bulb, new DeviceColor(255, 0, 0))));
+    }
+
+    // The device info and derived key come from a real H1270, via
+    // Mezzle/govee-bluetooth and lasswellt/govee-homeassistant. The AES-GCM
+    // vectors were computed independently with Python's cryptography package.
+    private static readonly byte[] H1270Info = Hex("4831323730fc19c132ebc0");
+    private static readonly byte[] H1270Key = Hex("6180f19566dedc80a3adef2f8b936184");
+    private static readonly byte[] TxIvKey = Hex("0011223344556677");
+    private static readonly byte[] RxIvKey = Hex("8a10ed17775ef1f4");
+
+    [Fact]
+    public void SessionKeyMatchesARealDevice()
+    {
+        Assert.Equal(H1270Key, GoveeGcmCipher.DeriveSessionKey(H1270Info));
+    }
+
+    [Fact]
+    public void DeviceIdentityIsTheSkuThenTheAddressReversed()
+    {
+        Assert.True(GoveeGcmCipher.IdentityMatches(H1270Info, "C0:EB:32:C1:19:FC"));
+        Assert.False(GoveeGcmCipher.IdentityMatches(H1270Info, "C0:EB:32:C1:19:FD"));
+        Assert.False(GoveeGcmCipher.IdentityMatches(H1270Info[..6], "C0:EB:32:C1:19:FC"));
+    }
+
+    [Fact]
+    public void GcmHandshakeRequestMatchesAnIndependentImplementation()
+    {
+        var iv = Enumerable.Range(0, 12).Select(i => (byte)i).ToArray();
+
+        Assert.Equal(Hex("e71101000102030405060708090a0b10564870b26a246b2a6c2bc9c245bbe91526e7879d27b550fc"), GoveeGcmCipher.BuildHandshakeRequest(iv, TxIvKey));
+    }
+
+    [Fact]
+    public void GcmHandshakeReplyGivesTheKeyAndIdentity()
+    {
+        var reply = Hex("e71100000102030405060708090a0bdc49bf96592ffca98cd84e3f9481f9f93c8a08bb9a4cadd163099ad90c1d305137360e");
+
+        var parsed = GoveeGcmCipher.ParseHandshakeResponse(reply);
+
+        Assert.NotNull(parsed);
+        Assert.Equal(RxIvKey, parsed.Value.RxIvKey);
+        Assert.Equal(H1270Info, parsed.Value.DeviceInfo);
+    }
+
+    [Fact]
+    public void GcmHandshakeRejectsAnythingElse()
+    {
+        var tampered = Hex("e71100000102030405060708090a0bdc49bf96592ffca98cd84e3f9481f9f93c8a08bb9a4cadd163099ad90c1d305137360e");
+        tampered[^1] ^= 1;
+
+        Assert.Null(GoveeGcmCipher.ParseHandshakeResponse(tampered));
+        Assert.Null(GoveeGcmCipher.ParseHandshakeResponse(LightFrames.Power(true)));
+    }
+
+    [Fact]
+    public void GcmFramesCountUpFromOne()
+    {
+        var cipher = new GoveeGcmCipher(H1270Key, TxIvKey, RxIvKey);
+        var frame = LightFrames.Power(true);
+
+        var first = cipher.Wrap(frame);
+
+        Assert.Equal(Hex("00000001443ce773a3d585c9f0702d36c7ee9ea7ab74ec2ef5508216699c482f1ad3407ae26e4949"), first);
+        Assert.Equal(40, first.Length);
+        Assert.Equal(Hex("00000002c3cf3556158ef85d53326030c9cf23aec3083ccd68bd091a99f840e643d7c94c2e1ad363"), cipher.Wrap(frame));
+    }
+
+    [Fact]
+    public void GcmNotificationsDecryptOrAreIgnored()
+    {
+        var cipher = new GoveeGcmCipher(H1270Key, TxIvKey, RxIvKey);
+        var packet = Hex("000000074ddbee58bfc6756a39f2cac1682fe1eaf3bdc8adb7bb88428f925c069ed8019255418877");
+
+        Assert.Equal(Hex("aa010100000000000000000000000000000000aa"), cipher.Unwrap(packet));
+
+        packet[10] ^= 1;
+        Assert.Null(cipher.Unwrap(packet));
+        Assert.Null(cipher.Unwrap([1, 2, 3]));
+    }
+
     private static KeyValuePair<ushort, byte[]> Advert(ushort companyId, params byte[] value) => new(companyId, value);
 
     [Fact]
@@ -201,11 +298,14 @@ public class BleTransportTests
     }
 
     [Fact]
-    public void TheDeviceIdCarriesTheWifiMacOneBelowTheBluetoothAddress()
+    public void TheBluetoothAddressIsTheDeviceIdTailOrOneAboveIt()
     {
         Assert.Equal(
             ["5C:E7:53:BC:97:9D", "5C:E7:53:BC:97:9C"],
             BleNaming.AddressCandidates("2C:67:5C:E7:53:BC:97:9C"));
+
+        // A real H66A1 advertises at the tail itself, so both have to be tried.
+        Assert.Contains("C0:17:55:BF:B2:A4", BleNaming.AddressCandidates("0E:81:C0:17:55:BF:B2:A4"));
 
         Assert.Equal("C0:17:55:BF:B3:00", BleNaming.AddressCandidates("0E:81:C0:17:55:BF:B2:FF").First());
         Assert.Empty(BleNaming.AddressCandidates("A4:C1:38:11:22:33"));
@@ -218,6 +318,10 @@ public class BleTransportTests
     [InlineData("GBK_H66A1_B2A4", "H66A1")]
     [InlineData("Govee_H6102_1234", "H6102")]
     [InlineData("GVH5075_1234", "H5075")]
+    [InlineData("GVH6008979D", "H6008")]
+    [InlineData("Govee_H66A1_B2A4", "H66A1")]
+    [InlineData("GV61881A2B", "H6188")]
+    [InlineData("GVH5075", null)]
     [InlineData("Living room speaker", null)]
     [InlineData("H6008", null)]
     [InlineData(null, null)]
@@ -291,5 +395,65 @@ public class BleTransportTests
 
         Assert.Throws<GoveeException>(() => BleOptions.ParseAddresses("2C:67=nope"));
         Assert.Throws<GoveeException>(() => BleOptions.ParseAddresses("justanaddress"));
+    }
+
+    [Fact]
+    public async Task SlowCommandsAreAnsweredBeforeTheProxyGivesUp()
+    {
+        var never = new TaskCompletionSource<IResult>();
+
+        var result = await HttpServer.RespondWithinAsync(never.Task, TimeSpan.FromMilliseconds(20));
+
+        Assert.Equal(202, ((IStatusCodeHttpResult)result).StatusCode);
+    }
+
+    [Fact]
+    public async Task FastCommandsKeepTheirOwnAnswer()
+    {
+        var done = Task.FromResult(Results.NotFound());
+
+        var result = await HttpServer.RespondWithinAsync(done, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(404, ((IStatusCodeHttpResult)result).StatusCode);
+    }
+
+    private static BleSettings Settings(string path)
+        => new(Microsoft.Extensions.Logging.Abstractions.NullLogger<BleSettings>.Instance, path);
+
+    [Fact]
+    public void KeepConnectedSurvivesARestart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"novee-{Guid.NewGuid():N}.json");
+        try
+        {
+            Settings(path).SetKeepConnected("AA:BB", true);
+            var reloaded = Settings(path);
+
+            Assert.True(reloaded.KeepConnected("aa:bb"));
+            Assert.False(reloaded.KeepConnected("CC:DD"));
+
+            reloaded.SetKeepConnected("AA:BB", false);
+            Assert.False(Settings(path).KeepConnected("AA:BB"));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ADamagedSettingsFileIsNotFatal()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"novee-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, "{ this is not json");
+
+            Assert.False(Settings(path).KeepConnected("AA:BB"));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 }

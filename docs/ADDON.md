@@ -26,7 +26,7 @@ Open the add-on's **Configuration** tab.
 | `mqtt_host`, `mqtt_port`, `mqtt_username`, `mqtt_password` | Only needed to override the broker Home Assistant already knows about. |
 | `debug_level` | `trace`, `debug`, `info`, `warn` or `error`. |
 | `no_multicast`, `broadcast_all`, `global_broadcast`, `scan` | LAN discovery tuning — see [CONFIG.md](CONFIG.md). |
-| `bluetooth`, `bluetooth_adapter`, `bluetooth_prefer`, `bluetooth_addresses`, `bluetooth_profile` | Bluetooth control for lights the cloud cannot reach — see [BLE.md](BLE.md). On by default when the host has an adapter. |
+| `bluetooth`, `bluetooth_adapter`, `bluetooth_prefer`, `bluetooth_addresses`, `bluetooth_profile`, `bluetooth_idle_seconds` | Bluetooth control for lights the cloud cannot reach — see [BLE.md](BLE.md). On by default when the host has an adapter. |
 | `http_port` | Port for the add-on's status page. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Leaving everything blank still works: the add-on will find devices that have LAN

@@ -27,6 +27,8 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
     public LanClient? LanClient { get; set; }
     public BleClient? BleClient { get; set; }
 
+    public BleSettings? BleSettings { get; set; }
+
     /// <summary>Why Bluetooth is off, when it is; shown by the API and the panel.</summary>
     public string? BleUnavailableReason { get; set; }
     public PlatformApiClient? PlatformClient { get; set; }
@@ -369,10 +371,11 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
                 await BleControlAsync(device, what, bleAction!, clearsScene, cancellationToken).ConfigureAwait(false);
                 return;
             }
-            catch (GoveeException ex) when (iot || platform)
+            catch (GoveeException ex) when ((iot || platform) && !device.CloudReportsOffline())
             {
-                // The offline verdict may be stale, and the light may be out of
-                // Bluetooth range, so the cloud still deserves a try.
+                // Bluetooth was only preferred here, so the cloud still deserves a
+                // try. A light the cloud calls offline skips this, because all it
+                // would add is an "offline" error hiding the real failure.
                 log.LogWarning("Bluetooth control of {Device} failed ({Message}); trying the cloud", device, ex.Message);
                 ble = false;
             }
@@ -446,6 +449,20 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
 
         await ClearSceneIfNeededAsync(device, clearsScene).ConfigureAwait(false);
     }
+
+    /// <summary>Remembers whether to hold this light's Bluetooth link open, and applies it now.</summary>
+    public async Task SetBleKeepConnectedAsync(Device device, bool keep)
+    {
+        BleSettings?.SetKeepConnected(device.Id, keep);
+        if (BleClient is { } ble && device.BleDevice is { } bleDevice)
+        {
+            await ble.SetKeepConnectedAsync(bleDevice, keep).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Records a control failure the caller may no longer be waiting for.</summary>
+    public void LogControlFailure(string device, string message)
+        => log.LogWarning("Control of {Device} failed: {Message}", device, message);
 
     /// <summary>Reads a device's state over Bluetooth and republishes it.</summary>
     public async Task<bool> PollBleAsync(Device device, CancellationToken cancellationToken = default)
@@ -557,6 +574,11 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
                 log.LogInformation("{Device} is reachable over Bluetooth as {Match}", device, match);
                 await UpdateDeviceAsync(device.Sku, device.Id, d => d.SetBleDevice(match)).ConfigureAwait(false);
                 changed = true;
+
+                if (BleSettings?.KeepConnected(device.Id) == true)
+                {
+                    await ble.SetKeepConnectedAsync(match, true).ConfigureAwait(false);
+                }
             }
 
             if (changed)
@@ -581,7 +603,12 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
 
             var seen = govee.Select(g =>
             {
-                byAddress.TryGetValue(g.Address, out var matched);
+                // Lights on the LAN are not attached over Bluetooth, but they are still yours.
+                if (!byAddress.TryGetValue(g.Address, out var matched))
+                {
+                    matched = devices.FirstOrDefault(d =>
+                        ble.Resolve(d.Sku, d.Id, d.AccountBleAddress(), d.AccountBleName())?.Address == g.Address);
+                }
                 var profile = BleLightProfile.Resolve(g.Sku ?? "");
                 return new BleScanReport.SeenDevice(
                     g.Address, g.Name ?? "", g.Sku ?? "", g.Rssi,

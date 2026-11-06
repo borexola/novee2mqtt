@@ -15,8 +15,8 @@ namespace Novee2Mqtt.Ble;
 /// Connections are opened on demand and dropped after a short idle period,
 /// because a Govee light accepts a single BLE connection and holding it would
 /// lock the Govee app out. Each connection reads the device's encrypt version
-/// and, on firmware that asks for it, runs the handshake that encrypts every
-/// frame after it.
+/// and, on firmware that asks for it, runs one of two handshakes that encrypt
+/// every frame after it.
 /// </summary>
 public sealed class BleClient : IAsyncDisposable
 {
@@ -26,13 +26,17 @@ public sealed class BleClient : IAsyncDisposable
     public const string EncryptionCharacteristicUuid = "00010203-0405-0607-0809-0a0b0c0d2b12";
 
     private const int ConnectAttempts = 3;
-    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ServicesTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ReplyTimeout = TimeSpan.FromSeconds(2.5);
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan HandshakeConfirmTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan FrameGap = TimeSpan.FromMilliseconds(40);
+    private static readonly TimeSpan HoldCheckInterval = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan HoldRetryMin = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan HoldRetryMax = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan HoldStableAfter = TimeSpan.FromSeconds(30);
 
     private readonly ILogger _log;
     private readonly BleOptions _options;
@@ -431,6 +435,14 @@ public sealed class BleClient : IAsyncDisposable
     public Task<IReadOnlyList<byte[]>> QueryStatusAsync(BleDevice device, CancellationToken cancellationToken = default)
         => Session(device).QueryStatusAsync(cancellationToken);
 
+    /// <summary>
+    /// With this on, the link stays up and is rebuilt whenever it drops, so
+    /// commands do not have to wait for a connection. Turning it off releases
+    /// the light straight away, so the Govee app can reach it again.
+    /// </summary>
+    public Task SetKeepConnectedAsync(BleDevice device, bool keep)
+        => Session(device).SetKeepConnectedAsync(keep);
+
     public Task DisconnectAsync(BleDevice device)
         => _sessions.TryGetValue(device.Address, out var session) ? session.DisconnectAsync() : Task.CompletedTask;
 
@@ -447,6 +459,7 @@ public sealed class BleClient : IAsyncDisposable
 
         foreach (var session in _sessions.Values)
         {
+            session.StopHolding();
             await session.DisconnectAsync().ConfigureAwait(false);
         }
         foreach (var watch in _watches)
@@ -475,11 +488,15 @@ public sealed class BleClient : IAsyncDisposable
 
         private string? _controlPath;
         private volatile bool _connected;
-        private volatile GoveeCipher? _cipher;
+        private volatile IBleCipher? _cipher;
+        private string? _unsupported;
         private volatile Channel<byte[]>? _handshake;
         private volatile PendingReply? _pending;
         private DateTimeOffset _lastActivity;
+        private DateTimeOffset _connectedAt;
         private CancellationTokenSource? _keepAlive;
+        private CancellationTokenSource? _holder;
+        private volatile bool _keepConnected;
 
         public string? NotifyPath { get; private set; }
 
@@ -564,22 +581,25 @@ public sealed class BleClient : IAsyncDisposable
                 return;
             }
 
-            if (data.Length != 20)
+            var frame = _cipher is { } cipher ? cipher.Unwrap(data) : data;
+
+            // Late handshake retransmits and the like fail these.
+            if (frame is not { Length: 20 } || PacketManager.Checksum(frame.AsSpan(0, 19)) != frame[19])
             {
                 return;
             }
 
-            var frame = _cipher is { } cipher ? cipher.Decrypt(data) : data;
-
-            // Late handshake retransmits and the like fail this.
-            if (PacketManager.Checksum(frame.AsSpan(0, 19)) != frame[19])
-            {
-                return;
-            }
+            owner._log.LogTrace("{Device} <= {Frame}", device, Convert.ToHexString(frame));
 
             if (frame[0] != LightFrames.Read)
             {
-                return; // the acknowledgement of a write, which proves receipt and nothing else
+                // The acknowledgement of a write proves receipt and nothing else,
+                // but a non-zero result is an outright refusal.
+                if (frame[0] == LightFrames.Write && frame[2] != 0)
+                {
+                    owner._log.LogWarning("{Device} refused command {Command:x2} with result {Result}", device, frame[1], frame[2]);
+                }
+                return;
             }
 
             if (_pending is { } pending && pending.Op == frame[1])
@@ -622,6 +642,88 @@ public sealed class BleClient : IAsyncDisposable
             NotifyPath = null;
         }
 
+        public async Task SetKeepConnectedAsync(bool keep)
+        {
+            if (keep == _keepConnected)
+            {
+                return;
+            }
+
+            _keepConnected = keep;
+            StopHolding();
+
+            if (keep)
+            {
+                var holder = new CancellationTokenSource();
+                _holder = holder;
+                _ = Task.Run(() => HoldLinkAsync(holder.Token), CancellationToken.None);
+                return;
+            }
+
+            await _lock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await DisconnectAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _lock.Release();
+            }
+        }
+
+        public void StopHolding()
+        {
+            _holder?.Cancel();
+            _holder = null;
+        }
+
+        /// <summary>Reconnects whenever the link is down, backing off while the light cannot be reached.</summary>
+        private async Task HoldLinkAsync(CancellationToken cancellationToken)
+        {
+            var retry = HoldRetryMin;
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    if (!_connected)
+                    {
+                        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            // A link that dies young counts as a failure, or a light that
+                            // keeps dropping us would be reconnected to in a tight loop.
+                            var lasted = DateTimeOffset.UtcNow - _connectedAt;
+                            retry = lasted >= HoldStableAfter
+                                ? HoldRetryMin
+                                : retry * 2 > HoldRetryMax ? HoldRetryMax : retry * 2;
+
+                            await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is GoveeException or DBusExceptionBase or TimeoutException)
+                        {
+                            if (_unsupported is not null)
+                            {
+                                owner._log.LogWarning("Cannot keep {Device} connected: {Message}", device, ex.Message);
+                                return;
+                            }
+
+                            owner._log.LogDebug("Could not keep {Device} connected, retrying in {Retry}: {Message}", device, retry, ex.Message);
+                        }
+                        finally
+                        {
+                            _lock.Release();
+                        }
+                    }
+
+                    await Task.Delay(_connected ? HoldCheckInterval : retry, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Turned off, or shutting down.
+            }
+        }
+
         public async Task DisconnectAsync()
         {
             var wasConnected = _connected;
@@ -639,6 +741,12 @@ public sealed class BleClient : IAsyncDisposable
                 return;
             }
 
+            // Reconnecting would only get the same answer, slowly.
+            if (_unsupported is { } reason)
+            {
+                throw new GoveeException(reason);
+            }
+
             // LE connects fail transiently as a matter of course, with errors
             // such as le-connection-abort-by-local. BlueZ can also forget the
             // device between attempts, so each one checks it is still known.
@@ -650,9 +758,15 @@ public sealed class BleClient : IAsyncDisposable
                     await ConnectOnceAsync(cancellationToken).ConfigureAwait(false);
                     return;
                 }
-                catch (GoveeException ex) when (ex is not BleUnsupportedException && attempt < ConnectAttempts)
+                catch (BleUnsupportedException ex)
                 {
-                    owner._log.LogDebug("Connecting to {Device}, attempt {Attempt}: {Message}", device, attempt, ex.Message);
+                    _unsupported = ex.Message;
+                    await DisconnectQuietlyAsync().ConfigureAwait(false);
+                    throw;
+                }
+                catch (GoveeException ex) when (attempt < ConnectAttempts)
+                {
+                    owner._log.LogInformation("Connecting to {Device}, attempt {Attempt}: {Message}", device, attempt, ex.Message);
                     await DisconnectQuietlyAsync().ConfigureAwait(false);
                     await Task.Delay(TimeSpan.FromSeconds(attempt), cancellationToken).ConfigureAwait(false);
                 }
@@ -695,6 +809,8 @@ public sealed class BleClient : IAsyncDisposable
 
         private async Task ConnectOnceAsync(CancellationToken cancellationToken)
         {
+            await ReleaseStaleLinkAsync(cancellationToken).ConfigureAwait(false);
+
             owner._log.LogInformation("Connecting to {Device} over Bluetooth", device);
             _cipher = null;
 
@@ -730,19 +846,24 @@ public sealed class BleClient : IAsyncDisposable
 
             var notifying = await StartNotifyAsync(cancellationToken).ConfigureAwait(false);
 
-            if (await NeedsEncryptionAsync(encryptionPath, cancellationToken).ConfigureAwait(false))
+            var version = await ReadEncryptVersionAsync(encryptionPath, cancellationToken).ConfigureAwait(false);
+            if (version != 0)
             {
                 if (!notifying)
                 {
                     throw new GoveeException($"{device} needs an encrypted session but its notifications did not start");
                 }
-                await HandshakeAsync(cancellationToken).ConfigureAwait(false);
+
+                _cipher = version == 1
+                    ? await HandshakeAsync(cancellationToken).ConfigureAwait(false)
+                    : await HandshakeGcmAsync(cancellationToken).ConfigureAwait(false);
             }
 
             _connected = true;
             _lastActivity = DateTimeOffset.UtcNow;
+            _connectedAt = _lastActivity;
             StartKeepAlive();
-            owner._log.LogInformation("Connected to {Device}{Mode}", device, _cipher is null ? "" : " (encrypted)");
+            owner._log.LogInformation("Connected to {Device}{Mode}", device, version == 0 ? "" : $" (encrypted, version {version})");
         }
 
         private async Task<bool> StartNotifyAsync(CancellationToken cancellationToken)
@@ -772,9 +893,9 @@ public sealed class BleClient : IAsyncDisposable
         /// <summary>
         /// The device's encrypt version decides, as in the Govee app: 0 or no
         /// characteristic falls back to the advertised flag, 1 is the AES and
-        /// RC4 scheme, and 2 is AES-GCM, which nobody has implemented.
+        /// RC4 scheme, and 2 is AES-GCM.
         /// </summary>
-        private async Task<bool> NeedsEncryptionAsync(string? encryptionPath, CancellationToken cancellationToken)
+        private async Task<int> ReadEncryptVersionAsync(string? encryptionPath, CancellationToken cancellationToken)
         {
             var version = 0;
             if (encryptionPath is not null)
@@ -790,15 +911,19 @@ public sealed class BleClient : IAsyncDisposable
                 }
             }
 
-            if (version > 1)
+            if (version > 2)
             {
                 throw new BleUnsupportedException($"{device} uses encrypt version {version}, which the bridge does not support");
             }
 
-            return version == 1 || (owner._seen.TryGetValue(device.Address, out var seen) && seen.Encrypted == true);
+            if (version != 0)
+            {
+                return version;
+            }
+            return owner._seen.TryGetValue(device.Address, out var seen) && seen.Encrypted == true ? 1 : 0;
         }
 
-        private async Task HandshakeAsync(CancellationToken cancellationToken)
+        private async Task<IBleCipher> HandshakeAsync(CancellationToken cancellationToken)
         {
             var replies = Channel.CreateUnbounded<byte[]>();
             _handshake = replies;
@@ -841,12 +966,81 @@ public sealed class BleClient : IAsyncDisposable
                     }
                 }
 
-                _cipher = new GoveeCipher(key);
+                return new GoveeCipher(key);
             }
             finally
             {
                 _handshake = null;
             }
+        }
+
+        private async Task<IBleCipher> HandshakeGcmAsync(CancellationToken cancellationToken)
+        {
+            var replies = Channel.CreateUnbounded<byte[]>();
+            _handshake = replies;
+            try
+            {
+                var txIvKey = GoveeGcmCipher.NewIvKey();
+                await WriteRawAsync(GoveeGcmCipher.BuildHandshakeRequest(GoveeGcmCipher.NewIv(), txIvKey), cancellationToken)
+                    .ConfigureAwait(false);
+
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(HandshakeTimeout);
+
+                try
+                {
+                    while (true)
+                    {
+                        var reply = await replies.Reader.ReadAsync(deadline.Token).ConfigureAwait(false);
+                        if (GoveeGcmCipher.ParseHandshakeResponse(reply) is not { } response)
+                        {
+                            owner._log.LogDebug("{Device} sent {Reply} during the handshake", device, Convert.ToHexString(reply));
+                            continue;
+                        }
+
+                        if (!GoveeGcmCipher.IdentityMatches(response.DeviceInfo, device.Address))
+                        {
+                            owner._log.LogInformation("{Device} identified itself as {Info}", device, Convert.ToHexString(response.DeviceInfo));
+                        }
+
+                        return new GoveeGcmCipher(GoveeGcmCipher.DeriveSessionKey(response.DeviceInfo), txIvKey, response.RxIvKey);
+                    }
+                }
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new GoveeException($"{device} did not answer the encryption handshake", ex);
+                }
+            }
+            finally
+            {
+                _handshake = null;
+            }
+        }
+
+        /// <summary>
+        /// BlueZ keeps a link up after the program that made it dies. That link
+        /// carries an encrypted session this run has no key for, so nothing
+        /// would work over it. Dropping it gives the next handshake a clean start.
+        /// </summary>
+        private async Task ReleaseStaleLinkAsync(CancellationToken cancellationToken)
+        {
+            Dictionary<string, VariantValue> props;
+            try
+            {
+                props = await owner._bus.GetAllAsync(_devicePath, BlueZBus.DeviceInterface, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is DBusExceptionBase or TimeoutException)
+            {
+                return; // Connect will report anything that matters
+            }
+
+            if (!props.TryGetValue("Connected", out var connected) || !connected.GetBool())
+            {
+                return;
+            }
+
+            owner._log.LogInformation("{Device} still has a link from before; starting it again", device);
+            await DisconnectQuietlyAsync().ConfigureAwait(false);
         }
 
         private async Task WaitForServicesAsync(CancellationToken cancellationToken)
@@ -907,14 +1101,14 @@ public sealed class BleClient : IAsyncDisposable
 
             try
             {
-                await WriteRawAsync(_cipher?.Encrypt(frame) ?? frame, cancellationToken).ConfigureAwait(false);
+                await WriteRawAsync(_cipher?.Wrap(frame) ?? frame, cancellationToken).ConfigureAwait(false);
             }
             catch (DBusErrorReplyException ex) when (IsDisconnected(ex))
             {
                 OnDisconnected();
                 owner._log.LogInformation("{Device} dropped the connection; reconnecting", device);
                 await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
-                await WriteRawAsync(_cipher?.Encrypt(frame) ?? frame, cancellationToken).ConfigureAwait(false);
+                await WriteRawAsync(_cipher?.Wrap(frame) ?? frame, cancellationToken).ConfigureAwait(false);
             }
 
             _lastActivity = DateTimeOffset.UtcNow;
@@ -980,7 +1174,7 @@ public sealed class BleClient : IAsyncDisposable
 
                         try
                         {
-                            if (DateTimeOffset.UtcNow - _lastActivity > TimeSpan.FromSeconds(owner._options.IdleSeconds))
+                            if (!_keepConnected && DateTimeOffset.UtcNow - _lastActivity > TimeSpan.FromSeconds(owner._options.IdleSeconds))
                             {
                                 owner._log.LogDebug("{Device} idle; disconnecting", device);
                                 await DisconnectAsync().ConfigureAwait(false);
@@ -991,7 +1185,7 @@ public sealed class BleClient : IAsyncDisposable
                             {
                                 var keepAlive = LightFrames.KeepAlive();
                                 owner._log.LogTrace("{Device} -> {Frame} (keep-alive)", device, Convert.ToHexString(keepAlive));
-                                await WriteRawAsync(_cipher?.Encrypt(keepAlive) ?? keepAlive, cts.Token).ConfigureAwait(false);
+                                await WriteRawAsync(_cipher?.Wrap(keepAlive) ?? keepAlive, cts.Token).ConfigureAwait(false);
                             }
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)

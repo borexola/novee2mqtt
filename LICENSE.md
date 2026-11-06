@@ -23,10 +23,18 @@ SOFTWARE.
 
 ---
 
+The AES-GCM session in `src/Novee2Mqtt/Ble/GoveeGcmCipher.cs` is derived from
+govee-homeassistant (https://github.com/lasswellt/govee-homeassistant):
+
+Copyright (c) 2021 Florian Lagg (@LaggAt)
+Copyright (c) 2025-2026 Tom Lasswell (@lasswellt)
+
 The Bluetooth cipher and the colour temperature tint table in `src/Novee2Mqtt/Ble`
 are derived from govee-ble-local (https://github.com/Brady-Woods/govee-ble-local):
 
 Copyright (c) 2026 Brady Woods
+
+Both are provided under the following terms:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

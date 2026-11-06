@@ -4,6 +4,16 @@ using Novee2Mqtt.Core;
 
 namespace Novee2Mqtt.Ble;
 
+/// <summary>Wraps frames for one connection's encrypted session.</summary>
+public interface IBleCipher
+{
+    /// <summary>Encrypts a frame for writing.</summary>
+    byte[] Wrap(byte[] frame);
+
+    /// <summary>Decrypts a notification, or returns null if it does not belong to this session.</summary>
+    byte[]? Unwrap(byte[] packet);
+}
+
 /// <summary>
 /// Govee's BLE frame cipher, used by firmware that reports encrypt version 1:
 /// AES-ECB on the first 16 bytes of a frame and RC4 on the last 4, with the RC4
@@ -12,7 +22,7 @@ namespace Novee2Mqtt.Ble;
 /// rather than security. Ported from the MIT-licensed
 /// <see href="https://github.com/Brady-Woods/govee-ble-local">govee-ble-local</see>.
 /// </summary>
-public sealed class GoveeCipher
+public sealed class GoveeCipher : IBleCipher
 {
     /// <summary>The pre-shared key the handshake frames are encrypted with.</summary>
     public static readonly byte[] HandshakeKey = Encoding.ASCII.GetBytes("MakingLifeSmarte");
@@ -34,6 +44,10 @@ public sealed class GoveeCipher
         }
         _key = key;
     }
+
+    public byte[] Wrap(byte[] frame) => Encrypt(frame);
+
+    public byte[]? Unwrap(byte[] packet) => packet.Length == FrameLength ? Decrypt(packet) : null;
 
     public byte[] Encrypt(byte[] frame) => Transform(frame, encrypt: true);
 

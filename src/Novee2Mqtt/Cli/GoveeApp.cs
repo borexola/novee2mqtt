@@ -24,6 +24,9 @@ public sealed class GoveeApp : IDisposable
         {
             HassDiscoveryPrefix = options.HassDiscoveryPrefix,
             TemperatureScale = options.TemperatureScale,
+            BleSettings = new Ble.BleSettings(
+                loggerFactory.CreateLogger<Ble.BleSettings>(),
+                System.IO.Path.Combine(System.IO.Path.GetDirectoryName(cache.Path)!, "bluetooth-settings.json")),
         };
     }
 
