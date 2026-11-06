@@ -63,7 +63,8 @@ public sealed record BleLightProfile(
         "H6010", "H6011", "H6013", "H613A", "H613D",
     };
 
-    // TV backlights with 14 segments. The app's traced frames, not hardware tested.
+    // TV backlights with 14 segments. The app's traced frames, with the Kelvin
+    // floor a real H66A1 reports to the Platform API.
     private static readonly HashSet<string> BacklightSkus = new(StringComparer.OrdinalIgnoreCase)
     {
         "H66A0", "H66A1",
@@ -88,7 +89,7 @@ public sealed record BleLightProfile(
         }
         if (BacklightSkus.Contains(sku))
         {
-            return new(BleColorMode.Segments, BrightnessAsPercent: true, Segments: 14, MinKelvin: 2700, MaxKelvin: 6500);
+            return new(BleColorMode.Segments, BrightnessAsPercent: true, Segments: 14, MinKelvin: 2200, MaxKelvin: 6500);
         }
         if (LegacySkus.Contains(sku))
         {
@@ -163,10 +164,12 @@ public sealed class BleOptions
     public bool Prefer { get; set; }
 
     /// <summary>
-    /// Seconds a connection is kept open after the last command. A light takes
-    /// only one connection, so holding it locks the Govee app out.
+    /// Seconds a connection is kept open after the last command. Connecting is
+    /// the slow part, 5 to 40 seconds on a real bulb, while a command on an open
+    /// link is immediate. A light takes only one connection, though, so holding
+    /// it locks the Govee app out over Bluetooth for this long.
     /// </summary>
-    public int IdleSeconds { get; set; } = 30;
+    public int IdleSeconds { get; set; } = 600;
 
     /// <summary>Seconds each discovery scan lasts.</summary>
     public int ScanSeconds { get; set; } = 15;
@@ -235,21 +238,42 @@ public sealed class BleOptions
 }
 
 /// <summary>How Govee devices identify themselves over Bluetooth.</summary>
-public static partial class BleNaming
+public static class BleNaming
 {
-    // Govee has used several prefixes over the years (ihoment_H6008_979C,
-    // GBK_H66A1_B2A4, Govee_H6102_1234, GVH5075_1234); the SKU always follows.
-    [GeneratedRegex(@"^(?:ihoment|GBK|Govee|GV|Minger)[_ -]?(H[0-9A-Z]{4})(?![0-9A-Z])", RegexOptions.IgnoreCase)]
-    private static partial Regex NamePattern();
+    private static readonly string[] BrandMarkers = ["ihoment_", "Govee_", "Minger_"];
 
+    /// <summary>
+    /// Reads the SKU from an advertised name, as the Govee app does. Names come
+    /// as <c>Govee_H66A1_B2A4</c> or <c>GBK_H619A_3197</c>, as <c>GVH5075_1234</c>,
+    /// as <c>GVH6008979D</c> with nothing between the SKU and the address, and
+    /// on older models as <c>GV61881A2B</c> with the H left out.
+    /// </summary>
     public static string? SkuFromName(string? name)
     {
         if (string.IsNullOrEmpty(name))
         {
             return null;
         }
-        var match = NamePattern().Match(name);
-        return match.Success ? match.Groups[1].Value.ToUpperInvariant() : null;
+
+        if (BrandMarkers.Any(m => name.Contains(m, StringComparison.Ordinal)) || name.StartsWith("GBK_", StringComparison.Ordinal))
+        {
+            var parts = name.TrimEnd('_').Split('_');
+            return parts.Length == 3 && parts[1].Length > 0 ? parts[1].ToUpperInvariant() : null;
+        }
+
+        if (name.StartsWith("GVH", StringComparison.Ordinal) || name.StartsWith("GVR", StringComparison.Ordinal))
+        {
+            var separator = name.IndexOf('_');
+            if (separator > 2)
+            {
+                return name[2..separator].ToUpperInvariant();
+            }
+            return separator < 0 && name.Length >= 11 ? name[2..7].ToUpperInvariant() : null;
+        }
+
+        return name.StartsWith("GV", StringComparison.Ordinal) && name.Length >= 10
+            ? ("H" + name[2..6]).ToUpperInvariant()
+            : null;
     }
 
     /// <summary>
@@ -281,9 +305,9 @@ public static partial class BleNaming
     }
 
     /// <summary>
-    /// The last six octets of a device id. For a WiFi device this is its WiFi
-    /// MAC, which is the Bluetooth address minus one, so prefer the address the
-    /// Govee account reports. Returns null for ids of any other shape.
+    /// The last six octets of a device id. This is the Bluetooth address on some
+    /// models and the WiFi MAC, one below it, on others, so prefer the address
+    /// the Govee account reports. Returns null for ids of any other shape.
     /// </summary>
     public static string? MacFromDeviceId(string deviceId)
     {

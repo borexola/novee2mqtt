@@ -81,7 +81,7 @@ what it needs and how devices are matched.
 | `--ble-prefer` | `GOVEE_BLE_PREFER=true` | `bluetooth_prefer` | Try Bluetooth before the cloud APIs for every device, not only the ones the cloud reports offline. |
 | `--ble-addresses` | `GOVEE_BLE_ADDRESSES=<id>=<mac>,…` | `bluetooth_addresses` | Override the Bluetooth address derived from a device id. |
 | — | `GOVEE_BLE_PROFILE=<sku>=<02\|0d\|15>[/byte],…` | `bluetooth_profile` | Override the frame layout for a model. |
-| — | `GOVEE_BLE_IDLE_SECONDS` | — | How long to keep a connection open after the last command. Default 30. |
+| — | `GOVEE_BLE_IDLE_SECONDS` | `bluetooth_idle_seconds` | How long to keep a connection open after the last command. Default 600. The Govee app cannot reach the light over Bluetooth during this time. |
 | — | `GOVEE_BLE_SCAN_SECONDS` | — | How long each discovery scan lasts. Default 15. |
 
 ## Presentation and runtime

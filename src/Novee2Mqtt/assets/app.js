@@ -13,6 +13,9 @@ const POLL_MS = 5000;
 // After a command, ignore server state for this device briefly: the transports
 // take a moment to report back and we do not want the slider to snap backwards.
 const SUPPRESS_MS = 4000;
+// A Bluetooth connection can take most of a minute. While one is under way the
+// server still holds the old state, which must not undo what was just pressed.
+const SLOW_SUPPRESS_MS = 60000;
 
 const COLOR_PRESETS = [
   "#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be",
@@ -20,6 +23,12 @@ const COLOR_PRESETS = [
 ];
 
 const KELVIN_PRESETS = [2200, 2700, 3500, 4500, 5500, 6500];
+
+const KEEP_CONNECTED_HELP =
+  "Stays connected to this light so commands run almost instantly. While this is on, " +
+  "the Govee app can't reach the light over Bluetooth, so a light with no internet " +
+  "can't be used from the app at all. It also uses one of your Bluetooth adapter's " +
+  "connections. Turn it off to use the app or update the light's firmware.";
 
 const ui = {
   devices: [],
@@ -116,6 +125,11 @@ async function call(path, options = {}) {
       } catch { /* non-JSON error body */ }
       toast(detail);
       return false;
+    }
+    if (response.status === 202) {
+      const id = /^api\/device\/([^/]+)/.exec(path)?.[1];
+      if (id) ui.suppressed.set(decodeURIComponent(id), Date.now() + SLOW_SUPPRESS_MS);
+      toast("Still connecting to the light; this can take a while.", "ok");
     }
     return true;
   } catch (error) {
@@ -274,6 +288,28 @@ function buildCard(device) {
         onclick: () => selectTab(id, refs, key),
       })));
 
+  refs.keepSwitch = el("button", {
+    class: "switch switch--small",
+    role: "switch",
+    "aria-checked": "false",
+    "aria-label": `Keep ${device.name} connected over Bluetooth`,
+    "aria-describedby": `keep-help-${id}`,
+    onclick: async () => {
+      const next = refs.keepSwitch.getAttribute("aria-checked") !== "true";
+      refs.keepSwitch.setAttribute("aria-checked", String(next));
+      suppress(id);
+      const done = await call(`api/device/${encodeURIComponent(id)}/keep-connected/${next ? "on" : "off"}`);
+      if (!done) refs.keepSwitch.setAttribute("aria-checked", String(!next));
+    },
+  });
+
+  refs.keep = el("div", { class: "keep" }, [
+    el("span", { class: "keep__label", text: "Keep connected" }),
+    el("span", { class: "keep__mark", "aria-hidden": "true", text: "?" }),
+    refs.keepSwitch,
+    el("div", { class: "keep__help", id: `keep-help-${id}`, role: "tooltip", text: KEEP_CONNECTED_HELP }),
+  ]);
+
   refs.foot = el("div", { class: "card__foot" });
 
   refs.root = el("div", { class: "card", "data-id": id }, [
@@ -292,6 +328,7 @@ function buildCard(device) {
     colorPanel,
     whitePanel,
     scenePanel,
+    refs.keep,
     refs.foot,
   ]);
 
@@ -353,9 +390,13 @@ function updateCard(refs, device) {
   refs.root.classList.toggle("is-on", on);
   refs.root.classList.toggle("is-offline", !!offline);
 
+  // Only a light reached over Bluetooth has a link to keep.
+  refs.keep.hidden = !device.ble;
+
   // Leave the controls alone while the user is still working with them.
   if (!isSuppressed(device.id)) {
     refs.power.setAttribute("aria-checked", String(on));
+    refs.keepSwitch.setAttribute("aria-checked", String(!!device.keep_connected));
 
     if (state) {
       const accent = state.kelvin > 0 ? kelvinToHex(state.kelvin) : hex(state.color || {});
@@ -647,8 +688,10 @@ document.addEventListener("DOMContentLoaded", () => {
     localStorage.setItem("novee2mqtt-theme", dark ? "dark" : "light");
   });
 
-  $("#ble").addEventListener("click", bleScan);
-  $("#ble-close").addEventListener("click", () => $("#ble-dialog").close());
+  // Optional because an old cached page may not have these yet, and a missing
+  // button must not stop the rest of the panel from starting.
+  $("#ble")?.addEventListener("click", bleScan);
+  $("#ble-close")?.addEventListener("click", () => $("#ble-dialog")?.close());
 
   $("#purge").addEventListener("click", async () => {
     if (await call("api/purge-caches", { method: "POST" })) {

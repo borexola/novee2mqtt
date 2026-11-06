@@ -37,15 +37,16 @@ LAN path to a Bluetooth device, trying these in order:
 2. The Bluetooth address and name your Govee account reports, when an email and
    password are configured. This is the reliable source.
 3. The address implied by the device id. The last six octets of an id such as
-   `2C:67:5C:E7:53:BC:97:9C` are the light's WiFi MAC, and its Bluetooth address
-   is normally that plus one, so `5C:E7:53:BC:97:9D`.
+   `2C:67:5C:E7:53:BC:97:9C` are the Bluetooth address on some models and the
+   WiFi MAC, one below it, on others, so both `5C:E7:53:BC:97:9C` and
+   `5C:E7:53:BC:97:9D` are tried.
 4. A device advertising the same model and id suffix.
 
 Devices still unmatched are looked for again every few minutes, backing off to
 hourly. The startup log shows the result:
 
 ```
-  Bluetooth: address=5C:E7:53:BC:97:9D name=ihoment_H6008_979D colour_mode=0x0d brightness=percent
+  Bluetooth: address=5C:E7:53:BC:97:9D name=GVH6008979D colour_mode=0x0d brightness=percent
 ```
 
 If a light is matched wrongly or not at all, map it explicitly:
@@ -64,9 +65,23 @@ For a device the cloud reports offline, or that has no cloud path at all,
 Bluetooth comes straight after LAN. Set `bluetooth_prefer`
 (`GOVEE_BLE_PREFER=true`) to use it ahead of the cloud for every device.
 
-Connections are opened on demand and closed after 30 seconds without a
-command (`GOVEE_BLE_IDLE_SECONDS`). A Govee light accepts one Bluetooth
-connection at a time, so holding it open would lock the Govee app out.
+Connections are opened on demand and stay open for 10 minutes after the last
+command, so anything you do in that time is immediate. Set
+`bluetooth_idle_seconds` (`GOVEE_BLE_IDLE_SECONDS`) to change that. A Govee light
+accepts one Bluetooth connection at a time, so the Govee app cannot reach a light
+over Bluetooth while the bridge holds it.
+
+For commands that are always close to instant, turn on **Keep connected** on the
+light's card in the control panel. The bridge then stays connected to that light
+and reconnects in the background if the link drops, across restarts too. The cost
+is that the Govee app cannot reach the light over Bluetooth while this is on, so a
+light with no internet cannot be used from the app at all, and each held light
+uses one of the adapter's connections. Turning it off releases the light at once.
+The same switch is `/api/device/{id}/keep-connected/{on|off}`.
+
+The first command on an idle light has to connect, which took from 5 to about 40
+seconds on a real bulb. The control panel and HTTP API answer after 12 seconds
+regardless, with `202`, and the command carries on in the background.
 
 ## State
 
@@ -87,14 +102,19 @@ cloud cannot reach.
 
 ## Encrypted firmware
 
-Govee runs two Bluetooth protocols. On connecting, the bridge reads the light's
-encrypt version, falling back to the flag in its advertisement, and on firmware
-that asks for it runs the handshake that encrypts every later frame. This is
-automatic, and firmware updates can change the answer for the same model.
-`ble-scan` shows what each light advertises in its `encrypted` column.
+Govee runs three Bluetooth protocols, and which one a light uses can change with
+its firmware. On connecting, the bridge reads the light's encrypt version,
+falling back to the flag in its advertisement, and runs the matching handshake.
+This is automatic.
 
-A newer scheme, encrypt version 2, is not supported, and the bridge says so
-rather than sending frames the light would ignore.
+| Version | Scheme | Seen on |
+|---|---|---|
+| 0 | Plain 20-byte frames | Older lights |
+| 1 | AES-ECB and RC4, after an `e7 01` handshake | H6008 |
+| 2 | AES-GCM with 40-byte packets, after an `e7 11` handshake | H66A1, H1270 |
+
+The log says which one a light used, for example
+`Connected to GVH6008979D (encrypted, version 1)`.
 
 ## Frame layouts
 
@@ -108,7 +128,8 @@ keeps a table by model:
 | `02` | Older strips (H6127, H6159, ...) | `33 05 02 R G B`, brightness 20 to 254 | Community captures |
 
 A light acknowledges a frame it then ignores, so a command can succeed while
-nothing visibly changes. If colour or brightness does not respond on a model,
+nothing visibly changes. Colour and brightness frames for version 2 lights are
+the same frames, wrapped in that cipher. If colour or brightness does not respond on a model,
 try the other layouts directly:
 
 ```bash
@@ -167,5 +188,9 @@ the light reports afterwards.
 * **The light connects but ignores everything** — check `encrypted` in
   `ble-scan`, then the frame layout above.
 * **Commands are slow** — each command on an idle light costs a Bluetooth
-  connection, typically one to three seconds. Raise `GOVEE_BLE_IDLE_SECONDS`
-  to keep the connection open longer between commands.
+  connection. A weak signal makes that much slower, so check the signal strength
+  in the scan. Turn on Keep connected on the light's card, or raise
+  `bluetooth_idle_seconds`.
+* **The panel is stuck on `connecting` after an update** — the browser kept the
+  old page. Right-click inside the panel and choose Reload Frame. Versions from
+  0.0.5 on tell browsers to check for a new page, so this should not recur.

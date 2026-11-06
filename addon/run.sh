@@ -86,6 +86,10 @@ if bashio::config.has_value bluetooth_profile ; then
   export GOVEE_BLE_PROFILE="$(bashio::config bluetooth_profile)"
 fi
 
+if bashio::config.has_value bluetooth_idle_seconds ; then
+  export GOVEE_BLE_IDLE_SECONDS="$(bashio::config bluetooth_idle_seconds)"
+fi
+
 if bashio::config.has_value http_port ; then
   export GOVEE_HTTP_PORT="$(bashio::config http_port)"
   if [ "$GOVEE_HTTP_PORT" != "8056" ]; then

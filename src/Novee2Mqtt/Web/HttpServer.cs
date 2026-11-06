@@ -45,6 +45,7 @@ public static class HttpServer
         [JsonPropertyName("room")] public string? Room { get; init; }
         [JsonPropertyName("ip")] public string? Ip { get; init; }
         [JsonPropertyName("ble")] public string? Ble { get; init; }
+        [JsonPropertyName("keep_connected")] public bool? KeepConnected { get; init; }
         [JsonPropertyName("state")] public DeviceState? State { get; init; }
     }
 
@@ -88,6 +89,7 @@ public static class HttpServer
             {
                 FileProvider = new PhysicalFileProvider(assetsPath),
                 RequestPath = "/assets",
+                OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache",
             });
         }
 
@@ -96,9 +98,16 @@ public static class HttpServer
         // under /api/hassio_ingress/<token>/: an absolute redirect or an
         // absolute /assets/... link would escape that prefix.
         var index = Path.Combine(assetsPath, "index.html");
-        app.MapGet("/", () => File.Exists(index)
-            ? Results.File(index, "text/html; charset=utf-8")
-            : Results.NotFound());
+        //
+        // no-cache makes browsers check before reusing a copy. Without it they
+        // can keep an old page after an update and pair it with a new script.
+        app.MapGet("/", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache";
+            return File.Exists(index)
+                ? Results.File(index, "text/html; charset=utf-8")
+                : Results.NotFound();
+        });
 
         // The address the add-on's "Open Web UI" button used before the page
         // moved to the root.
@@ -120,6 +129,7 @@ public static class HttpServer
                 Room = d.RoomName(),
                 Ip = d.IpAddress?.ToString(),
                 Ble = d.BleDevice?.Address,
+                KeepConnected = d.BleDevice is null ? null : state.BleSettings?.KeepConnected(d.Id) ?? false,
                 State = d.ComputeDeviceState(),
             })
             .ToList();
@@ -171,6 +181,27 @@ public static class HttpServer
                 return Task.FromResult(Respond(StatusCodes.Status400BadRequest, $"error parsing color '{color}'"));
             }
             return ControlAsync(state, id, (s, d, ct) => s.DeviceSetColorRgbAsync(d, parsed, ct));
+        });
+
+        app.MapMethods("/api/device/{id}/keep-connected/{choice}", GetOrPost, async (string id, string choice) =>
+        {
+            if (choice is not ("on" or "off"))
+            {
+                return Respond(StatusCodes.Status400BadRequest, "keep-connected must be 'on' or 'off'");
+            }
+
+            var device = await state.ResolveDeviceAsync(id).ConfigureAwait(false);
+            if (device is null)
+            {
+                return Respond(StatusCodes.Status404NotFound, $"device '{id}' not found");
+            }
+            if (device.BleDevice is null)
+            {
+                return Respond(StatusCodes.Status409Conflict, $"{device.Name()} is not connected over Bluetooth");
+            }
+
+            await state.SetBleKeepConnectedAsync(device, choice == "on").ConfigureAwait(false);
+            return Respond(StatusCodes.Status200OK, "ok");
         });
 
         app.MapMethods("/api/device/{id}/scene/{scene}", GetOrPost, (string id, string scene) =>
@@ -314,26 +345,33 @@ public static class HttpServer
             }
 
             var on = power == "on";
-            var failures = new List<string>();
 
-            // Sequential: the transports below are per-device rate limited, and a
-            // burst of parallel cloud calls is what trips Govee's throttling.
-            foreach (var device in members)
+            async Task<IResult> PowerAllAsync()
             {
-                try
+                var failures = new List<string>();
+
+                // Sequential: the transports below are per-device rate limited, and a
+                // burst of parallel cloud calls is what trips Govee's throttling.
+                foreach (var device in members)
                 {
-                    using var lease = await state.ResolveDeviceForControlAsync(device.Id).ConfigureAwait(false);
-                    await state.DevicePowerOnAsync(lease.Device, on, CancellationToken.None).ConfigureAwait(false);
+                    try
+                    {
+                        using var lease = await state.ResolveDeviceForControlAsync(device.Id).ConfigureAwait(false);
+                        await state.DevicePowerOnAsync(lease.Device, on, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        state.LogControlFailure(device.Id, ex.Message);
+                        failures.Add($"{device.Name()}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
-                {
-                    failures.Add($"{device.Name()}: {ex.Message}");
-                }
+
+                return failures.Count == 0
+                    ? Respond(StatusCodes.Status200OK, $"{members.Count} devices {power}")
+                    : Respond(StatusCodes.Status500InternalServerError, string.Join("; ", failures));
             }
 
-            return failures.Count == 0
-                ? Respond(StatusCodes.Status200OK, $"{members.Count} devices {power}")
-                : Respond(StatusCodes.Status500InternalServerError, string.Join("; ", failures));
+            return await RespondWithinAsync(PowerAllAsync(), ControlResponseWait).ConfigureAwait(false);
         });
     }
 
@@ -491,7 +529,28 @@ public static class HttpServer
         return sb.ToString();
     }
 
-    private static async Task<IResult> ControlAsync(
+    /// <summary>
+    /// A Bluetooth connection can take half a minute, longer than a reverse proxy
+    /// or Home Assistant ingress will wait. Answers within this time regardless,
+    /// and leaves the command running.
+    /// </summary>
+    private static readonly TimeSpan ControlResponseWait = TimeSpan.FromSeconds(12);
+
+    private static Task<IResult> ControlAsync(
+        ServiceState state,
+        string id,
+        Func<ServiceState, Device, CancellationToken, Task> action)
+        => RespondWithinAsync(RunControlAsync(state, id, action), ControlResponseWait);
+
+    internal static async Task<IResult> RespondWithinAsync(Task<IResult> work, TimeSpan wait)
+    {
+        var first = await Task.WhenAny(work, Task.Delay(wait)).ConfigureAwait(false);
+        return first == work
+            ? await work.ConfigureAwait(false)
+            : Respond(StatusCodes.Status202Accepted, "still working; the device is slow to answer");
+    }
+
+    private static async Task<IResult> RunControlAsync(
         ServiceState state,
         string id,
         Func<ServiceState, Device, CancellationToken, Task> action)
@@ -513,6 +572,7 @@ public static class HttpServer
         }
         catch (Exception ex)
         {
+            state.LogControlFailure(id, ex.Message);
             return Respond(StatusCodes.Status500InternalServerError, ex.Message);
         }
         finally
