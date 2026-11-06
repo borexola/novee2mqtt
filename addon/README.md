@@ -3,8 +3,9 @@
 Brings your Govee devices into Home Assistant through the MQTT integration.
 
 Prefers local LAN control where the device supports it, uses Govee's push
-notification service for live status updates, and falls back to the Govee
-Platform API for scenes, segments and sensors.
+notification service for live status updates, falls back to the Govee Platform
+API for scenes, segments and sensors, and drives lights the cloud cannot reach
+over Bluetooth from the Home Assistant host's adapter.
 
 ## Installation
 
@@ -26,6 +27,8 @@ set up first; the add-on will not start without a broker.
 | `mqtt_host` / `mqtt_port` / `mqtt_username` / `mqtt_password` | Override the broker Home Assistant already provides. |
 | `debug_level` | `trace`, `debug`, `info`, `warn`, `error`. |
 | `no_multicast` / `broadcast_all` / `global_broadcast` / `scan` | LAN discovery tuning. |
+| `bluetooth` | `true` or `false`. Default: on when the host has a Bluetooth adapter. |
+| `bluetooth_adapter` / `bluetooth_prefer` / `bluetooth_addresses` / `bluetooth_profile` | Bluetooth tuning — see the docs. |
 | `http_port` | Status page port. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Full documentation: <https://github.com/borexola/Novee2Mqtt/blob/main/docs/CONFIG.md>
@@ -37,3 +40,5 @@ Full documentation: <https://github.com/borexola/Novee2Mqtt/blob/main/docs/CONFI
   integration if you have it.
 * You must enable LAN control per device in the Govee Home app before this
   add-on can use it for that device.
+* Bluetooth control needs the light within range of the Home Assistant host's
+  own adapter. ESPHome Bluetooth proxies are not used.

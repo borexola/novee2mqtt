@@ -66,6 +66,26 @@ if bashio::config.has_value scan ; then
   export GOVEE_LAN_SCAN="$(bashio::config scan)"
 fi
 
+if bashio::config.has_value bluetooth ; then
+  export GOVEE_BLE="$(bashio::config bluetooth)"
+fi
+
+if bashio::config.has_value bluetooth_adapter ; then
+  export GOVEE_BLE_ADAPTER="$(bashio::config bluetooth_adapter)"
+fi
+
+if bashio::config.has_value bluetooth_prefer ; then
+  export GOVEE_BLE_PREFER="$(bashio::config bluetooth_prefer)"
+fi
+
+if bashio::config.has_value bluetooth_addresses ; then
+  export GOVEE_BLE_ADDRESSES="$(bashio::config bluetooth_addresses)"
+fi
+
+if bashio::config.has_value bluetooth_profile ; then
+  export GOVEE_BLE_PROFILE="$(bashio::config bluetooth_profile)"
+fi
+
 if bashio::config.has_value http_port ; then
   export GOVEE_HTTP_PORT="$(bashio::config http_port)"
   if [ "$GOVEE_HTTP_PORT" != "8056" ]; then

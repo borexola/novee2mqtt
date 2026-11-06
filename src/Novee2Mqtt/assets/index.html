@@ -27,6 +27,13 @@
         <span id="counts">connecting</span>
       </div>
 
+      <button id="ble" class="iconbtn" title="Scan for Govee devices over Bluetooth" aria-label="Bluetooth scan">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6.5 7l11 10-5.5 5V2l5.5 5-11 10" />
+        </svg>
+      </button>
+
       <button id="purge" class="iconbtn" title="Purge cached device data" aria-label="Purge caches">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -51,6 +58,19 @@
     </main>
 
     <div id="toasts" aria-live="polite"></div>
+
+    <dialog id="ble-dialog" class="sheet" aria-labelledby="ble-title">
+      <div class="sheet__head">
+        <h2 id="ble-title">Bluetooth scan</h2>
+        <button id="ble-close" class="iconbtn" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <div id="ble-body" class="sheet__body"></div>
+    </dialog>
 
     <script src="assets/app.js"></script>
   </body>

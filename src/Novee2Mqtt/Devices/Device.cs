@@ -81,6 +81,12 @@ public sealed class Device
     public LanDeviceStatus? IotDeviceStatus { get; private set; }
     public DateTimeOffset? LastIotDeviceStatusUpdate { get; private set; }
 
+    /// <summary>Set once the device has been matched to a Bluetooth address within range.</summary>
+    public BleDevice? BleDevice { get; private set; }
+
+    public LanDeviceStatus? BleDeviceStatus { get; private set; }
+    public DateTimeOffset? LastBleDeviceStatusUpdate { get; private set; }
+
     public NotifyHumidifierNightlight? NightlightState { get; private set; }
     public byte? TargetHumidityPercent { get; private set; }
     public byte? HumidifierWorkMode { get; private set; }
@@ -153,6 +159,17 @@ public sealed class Device
 
     public void SetLanDevice(LanDevice device) => LanDevice = device;
 
+    public void SetBleDevice(BleDevice? device) => BleDevice = device;
+
+    /// <returns>True if the status differs from what we previously held.</returns>
+    public bool SetBleDeviceStatus(LanDeviceStatus status)
+    {
+        var changed = BleDeviceStatus is null || BleDeviceStatus != status;
+        BleDeviceStatus = status;
+        LastBleDeviceStatusUpdate = DateTimeOffset.UtcNow;
+        return changed;
+    }
+
     /// <returns>True if the status differs from what we previously held.</returns>
     public bool SetLanDeviceStatus(LanDeviceStatus status)
     {
@@ -207,6 +224,10 @@ public sealed class Device
     // its light state are the same thing.
     public DeviceState? ComputeLanDeviceState() => FromStatus(
         LanDeviceStatus, LastLanDeviceStatusUpdate, "LAN API", LanDeviceStatus?.On);
+
+    // Likewise over Bluetooth: only lights are driven that way.
+    public DeviceState? ComputeBleDeviceState() => FromStatus(
+        BleDeviceStatus, LastBleDeviceStatusUpdate, "BLE", BleDeviceStatus?.On);
 
     public DeviceState? ComputeHttpDeviceState()
     {
@@ -277,7 +298,7 @@ public sealed class Device
     {
         DeviceState? best = null;
 
-        foreach (var candidate in new[] { ComputeLanDeviceState(), ComputeHttpDeviceState(), ComputeIotDeviceState() })
+        foreach (var candidate in new[] { ComputeLanDeviceState(), ComputeBleDeviceState(), ComputeHttpDeviceState(), ComputeIotDeviceState() })
         {
             if (candidate is null)
             {
@@ -363,6 +384,20 @@ public sealed class Device
 
     public bool PollableViaLan() => LanDevice is not null;
 
+    /// <summary>Whether Govee's cloud last reported this device as unreachable.</summary>
+    public bool CloudReportsOffline() => ComputeHttpDeviceState()?.Online == false;
+
+    /// <summary>The Bluetooth address the Govee account reports, if it does.</summary>
+    public string? AccountBleAddress()
+        => UndocDeviceInfo?.Entry.DeviceExt.DeviceSettings?.Address is { Length: > 0 } address ? address : null;
+
+    /// <summary>The name the Govee account says this device advertises, if it does.</summary>
+    public string? AccountBleName()
+        => UndocDeviceInfo?.Entry.DeviceExt.DeviceSettings?.BleName is { Length: > 0 } name ? name : null;
+
+    /// <summary>Where this device should appear over Bluetooth, for messages.</summary>
+    public string? ExpectedBleAddress() => AccountBleAddress() ?? BleNaming.AddressCandidates(Id).FirstOrDefault();
+
     public bool PollableViaIot()
     {
         if (!IotApiSupported())
@@ -403,7 +438,14 @@ public sealed class Device
         }
 
         // Unknown SKU, but it showed up via LAN discovery, so it is a light.
-        return LanDevice is not null ? Quirks.GenericLanLight(Sku) : null;
+        if (LanDevice is not null)
+        {
+            return Quirks.GenericLanLight(Sku);
+        }
+
+        // With nothing else to go on, a Bluetooth match is a light: the bridge
+        // only pairs lights. When the Platform API describes it, that wins.
+        return BleDevice is not null && HttpDeviceInfo is null ? Quirks.GenericBleLight(Sku) : null;
     }
 
     public DeviceCapability? GetCapabilityByInstance(string instance)
@@ -485,5 +527,6 @@ public sealed class Device
         return UndocDeviceInfo?.Entry.IsBleOnly;
     }
 
-    public bool IsControllable() => IsBleOnlyDevice() != true;
+    /// <summary>A BLE-only device becomes controllable once it is matched over Bluetooth.</summary>
+    public bool IsControllable() => IsBleOnlyDevice() != true || BleDevice is not null;
 }

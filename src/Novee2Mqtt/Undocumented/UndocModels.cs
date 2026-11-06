@@ -122,6 +122,12 @@ public sealed class DeviceSettings
 {
     [JsonPropertyName("wifiName")] public string? WifiName { get; set; }
     [JsonPropertyName("topic")] public string? Topic { get; set; }
+
+    /// <summary>The Bluetooth address, which for a WiFi device differs from the MAC in its id.</summary>
+    [JsonPropertyName("address")] public string? Address { get; set; }
+
+    /// <summary>The name the device advertises over Bluetooth.</summary>
+    [JsonPropertyName("bleName")] public string? BleName { get; set; }
 }
 
 public sealed class LightEffectLibraryResponse

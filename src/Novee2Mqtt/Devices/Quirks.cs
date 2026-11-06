@@ -102,6 +102,9 @@ public static class Quirks
     /// </summary>
     public static Quirk GenericLanLight(string sku) => LanLight(sku, Bulb);
 
+    /// <summary>Fallback for a SKU with no entry that was matched over Bluetooth.</summary>
+    public static Quirk GenericBleLight(string sku) => Light(sku, Bulb) with { IotApiSupported = false };
+
     private static Dictionary<string, Quirk> Load()
     {
         Quirk[] quirks =

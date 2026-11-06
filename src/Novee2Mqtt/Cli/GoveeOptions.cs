@@ -1,4 +1,5 @@
 using System.Net;
+using Novee2Mqtt.Ble;
 using Novee2Mqtt.Core;
 using Novee2Mqtt.Lan;
 
@@ -25,6 +26,13 @@ public sealed class GoveeOptions
     public bool GlobalBroadcast { get; set; }
     public List<IPAddress> Scan { get; } = [];
     public int DiscoTimeout { get; set; } = 3;
+
+    // Bluetooth
+    /// <summary>Null means automatic: used when BlueZ and an adapter are reachable.</summary>
+    public bool? BleEnabled { get; set; }
+    public string? BleAdapter { get; set; }
+    public bool BlePrefer { get; set; }
+    public Dictionary<string, string> BleAddresses { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     // MQTT broker
     public string? MqttHost { get; set; }
@@ -68,6 +76,21 @@ public sealed class GoveeOptions
         };
         options.AdditionalAddresses.AddRange(Scan);
 
+        return options.ApplyEnvironmentOverrides();
+    }
+
+    public BleOptions ToBleOptions()
+    {
+        var options = new BleOptions
+        {
+            Enabled = BleEnabled,
+            Adapter = BleAdapter,
+            Prefer = BlePrefer,
+        };
+        foreach (var (id, address) in BleAddresses)
+        {
+            options.Addresses[id] = address;
+        }
         return options.ApplyEnvironmentOverrides();
     }
 
@@ -122,6 +145,7 @@ public sealed class ArgParser(IReadOnlyList<string> args)
     public HashSet<string> BooleanOptions { get; } = new(StringComparer.Ordinal)
     {
         "no-multicast", "broadcast-all", "global-broadcast", "skip-lan", "list", "help",
+        "ble", "no-ble", "ble-prefer",
     };
 
     public IReadOnlyList<string> Positional
@@ -233,7 +257,18 @@ public sealed class ArgParser(IReadOnlyList<string> args)
             MqttHost = GetString("mqtt-host"),
             MqttUsername = GetString("mqtt-username"),
             MqttPassword = GetString("mqtt-password"),
+            BleEnabled = HasFlag("no-ble") ? false : HasFlag("ble") ? true : null,
+            BleAdapter = GetString("ble-adapter"),
+            BlePrefer = HasFlag("ble-prefer"),
         };
+
+        foreach (var entry in GetAll("ble-addresses"))
+        {
+            foreach (var (id, address) in BleOptions.ParseAddresses(entry))
+            {
+                options.BleAddresses[id] = address;
+            }
+        }
 
         foreach (var entry in GetAll("scan"))
         {

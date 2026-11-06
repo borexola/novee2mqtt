@@ -32,6 +32,9 @@ the original is for, and it is why this project is MIT too.
   changes usually show up within a couple of seconds.
 * **Platform API support** for everything the LAN and IoT paths cannot do:
   scenes, DIY scenes, music modes, segment colours and sensor readings.
+* **Bluetooth control** of power, brightness and colour for lights the cloud
+  cannot reach — a bulb kept off the internet, or a Bluetooth-only model — using
+  the Bluetooth adapter on the host, including firmware with encrypted Bluetooth.
 * **Per-device scenes and modes**, exposed as Home Assistant effects, selects,
   sliders and preset buttons depending on what the device supports.
 * **A built-in control panel** at `http://<host>:8056/` — power, brightness,
@@ -48,6 +51,7 @@ the original is for, and it is why this project is MIT too.
 | Live status updates | LAN and/or Govee account | Devices report changes within seconds |
 | Segment colour | API key | `Segment 00X` light entities under the main device |
 | Room assignment | Govee account | Suggested area on first discovery |
+| Bluetooth control | A Bluetooth adapter on the host | Lights with no LAN or cloud path |
 
 Where:
 
@@ -56,6 +60,8 @@ Where:
   *undocumented and unsupported* app API and AWS IoT service.
 * **LAN** means you have enabled the [Govee LAN API](https://app-h5.govee.com/user-manual/wlan-guide)
   on the supported devices, and that the protocol works on your network.
+* **Bluetooth** means the host running the bridge has a Bluetooth adapter within
+  range of the light, and BlueZ is reachable — see [docs/BLE.md](docs/BLE.md).
 
 None of these are strictly required — with no configuration at all the bridge
 will still find and control devices that have LAN control enabled — but with none
@@ -67,6 +73,7 @@ of them there is also no broker to publish to.
 * [Running it in Docker](docs/DOCKER.md)
 * [Configuration reference](docs/CONFIG.md)
 * [LAN API requirements](docs/LAN.md)
+* [Bluetooth control](docs/BLE.md)
 * [FAQ](docs/FAQ.md)
 * [Privacy](docs/PRIVACY.md)
 
@@ -105,7 +112,8 @@ docker run -d --name novee2mqtt --restart unless-stopped --network host -v novee
 ```
 
 Host networking is required — the Govee LAN protocol needs to receive replies on
-UDP port 4002 and to send multicast discovery packets.
+UDP port 4002 and to send multicast discovery packets. For Bluetooth in Docker,
+see [docs/BLE.md](docs/BLE.md).
 
 ## Command line
 
@@ -123,6 +131,8 @@ docker run --rm --network host --env-file .env ghcr.io/borexola/novee2mqtt:lates
 | `list-http` | List devices known to the Platform API |
 | `lan-disco` | Probe the LAN and report which devices answer |
 | `lan-control --ip <addr> …` | Drive one device directly over the LAN |
+| `ble-scan` | Scan for Govee devices over Bluetooth and show how they map |
+| `ble-control --address <mac> --sku <sku> …` | Drive one device directly over Bluetooth |
 | `http-control --id <id> …` | Drive one device through the Platform API |
 | `undoc show-one-click` | Show the Tap-to-Run shortcuts we can trigger |
 | `health` | Probe a running instance; exits non-zero when unhealthy |
@@ -148,6 +158,7 @@ work from a script, a wall panel or a Home Assistant `rest_command`.
 | `GET /api/rooms` | Rooms, with device and on counts |
 | `GET /api/room/{room}/power/{on\|off}` | Power every device in a room |
 | `GET /api/oneclicks` | Tap-to-Run shortcuts |
+| `POST /api/ble/scan` | Scan for Govee devices over Bluetooth and attach any found |
 | `GET /api/oneclick/activate/{name}` | Run a Tap-to-Run shortcut |
 | `POST /api/purge-caches` | Drop cached device data and re-register |
 | `GET /api/health` | Aggregate status; `503` when degraded |
@@ -205,6 +216,12 @@ The AWS IoT support in that project was in turn made possible by
 [@bwp91](https://github.com/bwp91)'s work in
 [homebridge-govee](https://github.com/bwp91/homebridge-govee/). That upstream
 copyright notice is retained in `LICENSE.md` as the MIT licence requires.
+
+The Bluetooth session, including the encrypted channel and the colour temperature
+tint table, follows [govee-ble-local](https://github.com/Brady-Woods/govee-ble-local)
+by Brady Woods, whose MIT notice is also in `LICENSE.md`. The captured frames come
+from [Govee-Reverse-Engineering](https://github.com/egold555/Govee-Reverse-Engineering)
+and its contributors.
 
 Written for this project: the control panel, the HTTP/REST API with its health,
 metrics and event-stream endpoints, the .NET application and container

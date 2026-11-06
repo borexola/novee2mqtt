@@ -88,6 +88,7 @@ function ago(iso) {
 function sourceTag(source) {
   const value = (source || "").toUpperCase();
   if (value.includes("LAN")) return { label: "LAN", cls: "tag tag--lan" };
+  if (value.includes("BLE")) return { label: "BLE", cls: "tag tag--ble" };
   if (value.includes("IOT")) return { label: "IoT", cls: "tag tag--iot" };
   if (value.includes("PLATFORM")) return { label: "Cloud", cls: "tag tag--cloud" };
   return { label: source || "unknown", cls: "tag" };
@@ -120,6 +121,22 @@ async function call(path, options = {}) {
   } catch (error) {
     toast(`Request failed: ${error.message}`);
     return false;
+  }
+}
+
+/* Like call(), but returns the parsed JSON body, or null on failure. */
+async function fetchJson(path, options = {}) {
+  try {
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      toast((body && body.msg) || `HTTP ${response.status}`);
+      return null;
+    }
+    return body;
+  } catch (error) {
+    toast(`Request failed: ${error.message}`);
+    return null;
   }
 }
 
@@ -330,7 +347,8 @@ function updateCard(refs, device) {
   refs.name.textContent = device.name;
 
   const on = !!(state && state.on);
-  const offline = state && state.online === false;
+  // The cloud's verdict means nothing for a light reachable over Bluetooth.
+  const offline = state && state.online === false && !device.ble;
 
   refs.root.classList.toggle("is-on", on);
   refs.root.classList.toggle("is-offline", !!offline);
@@ -370,8 +388,70 @@ function updateCard(refs, device) {
     foot.push(el("span", { text: "no state reported" }));
   }
   if (device.ip) foot.push(el("span", { text: device.ip }));
+  if (device.ble && !device.ip) foot.push(el("span", { text: device.ble, title: "Bluetooth address" }));
   foot.push(el("span", { class: "card__id", text: device.id }));
   refs.foot.replaceChildren(...foot);
+}
+
+/* ---------------------------------------------------------- bluetooth scan */
+
+async function bleScan() {
+  const button = $("#ble");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.classList.add("iconbtn--busy");
+  toast("Scanning for Bluetooth devices, this takes about 15 seconds...", "ok");
+
+  try {
+    const report = await fetchJson("api/ble/scan", { method: "POST" });
+    if (report) showBleReport(report);
+  } finally {
+    button.disabled = false;
+    button.classList.remove("iconbtn--busy");
+  }
+}
+
+function showBleReport(report) {
+  const body = $("#ble-body");
+  const parts = [];
+
+  if (report.error) {
+    parts.push(el("p", { text: `The scan ran into a problem: ${report.error}` }));
+  }
+
+  parts.push(el("h3", { text: `Govee devices in range of ${report.adapter}` }));
+  if (report.seen.length === 0) {
+    parts.push(el("p", { text: "None. The adapter saw " + (report.other_devices
+      ? `${report.other_devices} other Bluetooth device(s), so the radio works; the lights are out of range or busy with a phone.`
+      : "nothing at all; check that the host's adapter is working.") }));
+  } else {
+    parts.push(el("ul", { class: "blelist" }, report.seen.map((d) => el("li", {}, [
+      el("span", { class: "blelist__name", text: d.name }),
+      el("span", { class: "blelist__rssi", text: d.rssi == null ? "" : `${d.rssi} dBm` }),
+      el("span", { class: "blelist__meta", text: d.device_name
+        ? `${d.address} \u2192 ${d.device_name}`
+        : `${d.address} \u2014 not one of your account's devices` }),
+    ]))));
+  }
+
+  if (report.missing.length) {
+    parts.push(el("h3", { text: "Expected but not seen" }));
+    parts.push(el("ul", { class: "blelist" }, report.missing.map((d) => el("li", {}, [
+      el("span", { class: "blelist__name", text: d.name }),
+      el("span", { class: "blelist__rssi", text: d.sku }),
+      el("span", { class: "blelist__meta", text: `expected at ${d.expected_address || "unknown address"}` }),
+    ]))));
+    parts.push(el("p", { text: "A device that is not seen is out of range of the host, has Bluetooth off, or is connected to a phone right now." }));
+  }
+
+  if (report.changed) {
+    parts.push(el("p", { text: "New matches were attached and Home Assistant has been told." }));
+  }
+
+  body.replaceChildren(...parts);
+  const dialog = $("#ble-dialog");
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
 }
 
 /* ------------------------------------------------------------------- render */
@@ -566,6 +646,9 @@ document.addEventListener("DOMContentLoaded", () => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.setItem("novee2mqtt-theme", dark ? "dark" : "light");
   });
+
+  $("#ble").addEventListener("click", bleScan);
+  $("#ble-close").addEventListener("click", () => $("#ble-dialog").close());
 
   $("#purge").addEventListener("click", async () => {
     if (await call("api/purge-caches", { method: "POST" })) {

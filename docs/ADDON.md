@@ -26,6 +26,7 @@ Open the add-on's **Configuration** tab.
 | `mqtt_host`, `mqtt_port`, `mqtt_username`, `mqtt_password` | Only needed to override the broker Home Assistant already knows about. |
 | `debug_level` | `trace`, `debug`, `info`, `warn` or `error`. |
 | `no_multicast`, `broadcast_all`, `global_broadcast`, `scan` | LAN discovery tuning — see [CONFIG.md](CONFIG.md). |
+| `bluetooth`, `bluetooth_adapter`, `bluetooth_prefer`, `bluetooth_addresses`, `bluetooth_profile` | Bluetooth control for lights the cloud cannot reach — see [BLE.md](BLE.md). On by default when the host has an adapter. |
 | `http_port` | Port for the add-on's status page. Default 8056. Leave it at 8056 to keep the sidebar panel. |
 
 Leaving everything blank still works: the add-on will find devices that have LAN
@@ -54,6 +55,10 @@ panel stops working and only the direct address remains.
 * The add-on runs with host networking, which the Govee LAN protocol requires.
   Only one process on the host can bind UDP port 4002 — if you also run the
   `Govee LAN Control` integration, disable it.
+* The add-on also asks for access to the host's D-Bus, which is how it reaches
+  the Bluetooth adapter, and ships its own AppArmor profile to allow that. Lights
+  are only reachable over Bluetooth when they are within range of the Home
+  Assistant host itself; Bluetooth proxies are not used.
 * Cached device and scene metadata lives in the add-on's `/data` and survives
   restarts and updates.
 * MQTT topics and entity unique ids match the `govee2mqtt` bridge, so migrating

@@ -44,6 +44,7 @@ public static class HttpServer
         [JsonPropertyName("name")] public required string Name { get; init; }
         [JsonPropertyName("room")] public string? Room { get; init; }
         [JsonPropertyName("ip")] public string? Ip { get; init; }
+        [JsonPropertyName("ble")] public string? Ble { get; init; }
         [JsonPropertyName("state")] public DeviceState? State { get; init; }
     }
 
@@ -118,6 +119,7 @@ public static class HttpServer
                 Name = d.Name(),
                 Room = d.RoomName(),
                 Ip = d.IpAddress?.ToString(),
+                Ble = d.BleDevice?.Address,
                 State = d.ComputeDeviceState(),
             })
             .ToList();
@@ -246,6 +248,27 @@ public static class HttpServer
             cache.Purge();
             return Respond(StatusCodes.Status200OK, "ok");
         });
+
+        // Scans take a while, so the panel calls this on demand rather than
+        // the bridge scanning continuously. Matches found are attached at once.
+        app.MapMethods("/api/ble/scan", GetOrPost, async (int? seconds, CancellationToken cancellationToken) =>
+        {
+            if (state.BleClient is null)
+            {
+                return Respond(StatusCodes.Status503ServiceUnavailable,
+                    state.BleUnavailableReason ?? "Bluetooth is not available");
+            }
+
+            try
+            {
+                var report = await state.ScanBluetoothAsync(seconds, cancellationToken).ConfigureAwait(false);
+                return Results.Json(report, ApiJson);
+            }
+            catch (GoveeException ex)
+            {
+                return Respond(StatusCodes.Status503ServiceUnavailable, ex.Message);
+            }
+        });
     }
 
     /// <summary>
@@ -347,6 +370,8 @@ public static class HttpServer
                     mqtt = Describe(mqtt),
                     iot = Describe(state.IotClient?.IsConnected),
                     lan = state.LanClient is null ? "disabled" : "enabled",
+                    ble = state.BleClient is null ? "disabled" : "enabled",
+                    ble_reason = state.BleClient is null ? state.BleUnavailableReason : null,
                     platform = state.PlatformClient is null ? "disabled" : "enabled",
                 },
             };
@@ -440,6 +465,7 @@ public static class HttpServer
             ("transport=\"mqtt\"", state.HassClient?.IsConnected == true ? 1 : 0),
             ("transport=\"iot\"", state.IotClient?.IsConnected == true ? 1 : 0),
             ("transport=\"lan\"", state.LanClient is not null ? 1 : 0),
+            ("transport=\"ble\"", state.BleClient is not null ? 1 : 0),
             ("transport=\"platform\"", state.PlatformClient is not null ? 1 : 0),
         ]);
 

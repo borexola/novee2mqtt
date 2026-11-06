@@ -39,6 +39,13 @@ named volume at `/data` for the cache.
 docker run -d --name novee2mqtt --restart unless-stopped --network host -v novee2mqtt-cache:/data --env-file .env ghcr.io/borexola/novee2mqtt:latest
 ```
 
+## Bluetooth
+
+Lights with no LAN API that Govee's cloud cannot reach are controlled over
+Bluetooth through the host's BlueZ daemon, from an adapter within range of the
+lights. It is off in the setups above, and the bridge logs one line and carries
+on. [BLE.md](BLE.md) covers what the container needs to reach BlueZ.
+
 ## Verifying it works
 
 Open `http://<host>:8056/` for the control panel, or:

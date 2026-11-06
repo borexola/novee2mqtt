@@ -67,6 +67,23 @@ routers — hence the options below.
 
 See [LAN.md](LAN.md) for the network requirements in detail.
 
+## Bluetooth control
+
+Lights that have no LAN API and no route to Govee's cloud can be driven over
+Bluetooth from the adapter on the host. It is on by default whenever BlueZ and
+an adapter are reachable, and otherwise silently off. See [BLE.md](BLE.md) for
+what it needs and how devices are matched.
+
+| CLI | Environment | Add-on option | Purpose |
+|---|---|---|---|
+| `--ble` / `--no-ble` | `GOVEE_BLE=true\|false` | `bluetooth` | Force Bluetooth on (fail loudly if unavailable) or off. |
+| `--ble-adapter` | `GOVEE_BLE_ADAPTER=hci0` | `bluetooth_adapter` | Which adapter to use. Default: the first one BlueZ lists. |
+| `--ble-prefer` | `GOVEE_BLE_PREFER=true` | `bluetooth_prefer` | Try Bluetooth before the cloud APIs for every device, not only the ones the cloud reports offline. |
+| `--ble-addresses` | `GOVEE_BLE_ADDRESSES=<id>=<mac>,…` | `bluetooth_addresses` | Override the Bluetooth address derived from a device id. |
+| — | `GOVEE_BLE_PROFILE=<sku>=<02\|0d\|15>[/byte],…` | `bluetooth_profile` | Override the frame layout for a model. |
+| — | `GOVEE_BLE_IDLE_SECONDS` | — | How long to keep a connection open after the last command. Default 30. |
+| — | `GOVEE_BLE_SCAN_SECONDS` | — | How long each discovery scan lasts. Default 15. |
+
 ## Presentation and runtime
 
 | CLI | Environment | Add-on option | Purpose |

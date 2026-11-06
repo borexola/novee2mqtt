@@ -1,5 +1,5 @@
 name: Novee2Mqtt
-version: "0.0.3"
+version: "0.0.4"
 slug: novee2mqtt
 description: Control Govee devices from Home Assistant over MQTT
 url: https://github.com/borexola/novee2mqtt
@@ -16,6 +16,8 @@ startup: services
 services:
   - mqtt:need
 
+# Bluetooth goes through the host's BlueZ daemon over D-Bus, which the default
+# AppArmor profile refuses. apparmor.txt is that profile's rules plus BlueZ.
 apparmor: true
 
 webui: http://[HOST]:[PORT:8056]/
@@ -32,6 +34,11 @@ panel_title: Novee2Mqtt
 # multicast and broadcast discovery packets, neither of which works from inside
 # the add-on's own network namespace.
 host_network: true
+
+# Bluetooth control goes through the host's BlueZ daemon over D-Bus. Devices
+# that cannot use the LAN API and have no route to Govee's cloud are driven
+# this way, from the Bluetooth adapter on the Home Assistant host.
+host_dbus: true
 
 options:
   temperature_scale: "C"
@@ -50,4 +57,9 @@ schema:
   broadcast_all: "bool?"
   global_broadcast: "bool?"
   scan: "str?"
+  bluetooth: "bool?"
+  bluetooth_adapter: "str?"
+  bluetooth_prefer: "bool?"
+  bluetooth_addresses: "str?"
+  bluetooth_profile: "str?"
   http_port: "int?"
