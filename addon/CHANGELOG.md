@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Bluetooth control of power, brightness, colour and colour temperature for
+  lights that have no LAN API and no route to Govee's cloud, such as a bulb kept
+  on a network without internet access, including firmware that encrypts its
+  Bluetooth traffic. Scenes and segments still need the cloud. The add-on
+  now requests D-Bus access to the host's BlueZ daemon; the light must be within
+  range of the Home Assistant host's adapter. New options `bluetooth`,
+  `bluetooth_adapter`, `bluetooth_prefer`, `bluetooth_addresses` and
+  `bluetooth_profile`, a Bluetooth scan button in the control panel that shows
+  what is in range, and `ble-scan` and `ble-control` commands for the same from
+  a shell.
+
 ## 0.0.3
 
 ### Added

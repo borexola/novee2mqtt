@@ -11,6 +11,10 @@
 
   <ItemGroup>
     <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
+    <!-- BlueZ over the system D-Bus, for Bluetooth control. The higher-level
+         Linux.Bluetooth wrapper pins a Tmds.DBus with an open advisory, so the
+         handful of BlueZ calls needed are written against the protocol layer. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.95.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
     <!-- Microsoft.Data.Sqlite 10.0.10 still pulls the 2.1.11 native bundle, which
          carries advisory GHSA-2m69-gcr7-jv3q. Pin the patched line explicitly. -->

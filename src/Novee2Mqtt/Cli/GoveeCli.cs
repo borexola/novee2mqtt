@@ -76,6 +76,8 @@ public static class GoveeCli
                 "list-http" => await DiagnosticCommands.ListHttpAsync(app, shutdown.Token).ConfigureAwait(false),
                 "lan-disco" => await DiagnosticCommands.LanDiscoAsync(app, shutdown.Token).ConfigureAwait(false),
                 "lan-control" => await DiagnosticCommands.LanControlAsync(app, parser, shutdown.Token).ConfigureAwait(false),
+                "ble-scan" => await DiagnosticCommands.BleScanAsync(app, parser, shutdown.Token).ConfigureAwait(false),
+                "ble-control" => await DiagnosticCommands.BleControlAsync(app, parser, shutdown.Token).ConfigureAwait(false),
                 "http-control" => await DiagnosticCommands.HttpControlAsync(app, parser, shutdown.Token).ConfigureAwait(false),
                 "undoc" => await DiagnosticCommands.UndocAsync(app, parser, shutdown.Token).ConfigureAwait(false),
                 _ => Unknown(command),
@@ -143,6 +145,11 @@ public static class GoveeCli
               lan-control --ip <addr>    Control one device over the LAN
                   on | off | brightness <percent> | temperature <kelvin> | color <css-color>
                   scene [--list | <name>] | command <byte>...
+              ble-scan                   Scan for Govee devices over Bluetooth and show how they map
+              ble-control --address <mac> --sku <sku>
+                                         Control one device over Bluetooth
+                  on | off | brightness <percent> | temperature <kelvin> | color <css-color>
+                  status | command <byte>...   (--color-mode 02|0d|15 overrides the frame layout)
               http-control --id <id>     Control one device through the Platform API
                   on | off | info | status | brightness <percent> | temperature <kelvin>
                   color <css-color> | scene [--list | <name>]   (music modes are "Music: <mode>" scenes)
@@ -169,6 +176,15 @@ public static class GoveeCli
               --global-broadcast         $GOVEE_LAN_BROADCAST_GLOBAL
               --scan <ip[,ip...]>        $GOVEE_LAN_SCAN
               --disco-timeout <seconds>  $GOVEE_LAN_DISCO_TIMEOUT      Default 3
+
+            BLUETOOTH:
+              --ble | --no-ble           $GOVEE_BLE          Default: on when BlueZ has an adapter
+              --ble-adapter <hciN>       $GOVEE_BLE_ADAPTER  Default: the first adapter
+              --ble-prefer               $GOVEE_BLE_PREFER   Try Bluetooth before the cloud APIs
+              --ble-addresses <id=mac,…> $GOVEE_BLE_ADDRESSES  Device id to Bluetooth address overrides
+                                         $GOVEE_BLE_PROFILE  Frame layout overrides, e.g. H66A1=0d
+                                         $GOVEE_BLE_IDLE_SECONDS  Keep a connection open this long, default 30
+                                         $GOVEE_BLE_SCAN_SECONDS  Discovery scan length, default 15
 
             OTHER:
               --http-port <port>         $GOVEE_HTTP_PORT    Web UI port, default 8056

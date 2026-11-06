@@ -1,5 +1,6 @@
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using Novee2Mqtt.Ble;
 using Novee2Mqtt.Core;
 using Novee2Mqtt.Devices;
 using Novee2Mqtt.Hass;
@@ -25,7 +26,13 @@ public static class ServeCommand
         await using var cloud = new CloudServices(app, log);
         await cloud.LoadAsync(cancellationToken).ConfigureAwait(false);
 
+        // Bluetooth scanning runs alongside the LAN discovery wait, so startup
+        // takes no longer than the slower of the two.
+        await using var bleClient = await StartBleAsync(app, log, cancellationToken).ConfigureAwait(false);
+        var bleScan = bleClient is null ? Task.CompletedTask : app.State.ScanBluetoothAsync(cancellationToken: cancellationToken);
+
         await using var lanClient = await StartLanDiscoveryAsync(app, log, cancellationToken).ConfigureAwait(false);
+        await bleScan.ConfigureAwait(false);
 
         await ReportDeviceInventoryAsync(app, log).ConfigureAwait(false);
 
@@ -33,6 +40,9 @@ public static class ServeCommand
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, background.Token);
         var pollTask = Task.Run(() => PeriodicStatePollAsync(state, log, linked.Token), CancellationToken.None);
         var cloudTask = Task.Run(() => CloudMaintenanceAsync(app, cloud, log, linked.Token), CancellationToken.None);
+        var bleTask = bleClient is null
+            ? Task.CompletedTask
+            : Task.Run(() => BleRescanLoopAsync(app, bleClient, log, linked.Token), CancellationToken.None);
 
         await using var hassClient = await StartHassAsync(app, log, cancellationToken).ConfigureAwait(false);
 
@@ -49,7 +59,7 @@ public static class ServeCommand
             log.LogInformation("Shutting down");
 
             await background.CancelAsync().ConfigureAwait(false);
-            foreach (var task in new[] { pollTask, cloudTask })
+            foreach (var task in new[] { pollTask, cloudTask, bleTask })
             {
                 try
                 {
@@ -161,6 +171,74 @@ public static class ServeCommand
         log.LogInformation("Web UI ready at {Addresses}", string.Join("  ", addresses));
     }
 
+    private static async Task<BleClient?> StartBleAsync(GoveeApp app, ILogger log, CancellationToken cancellationToken)
+    {
+        var options = app.Options.ToBleOptions();
+        if (options.IsDisabled)
+        {
+            app.State.BleUnavailableReason = "Bluetooth is disabled by configuration (GOVEE_BLE=false)";
+            return null;
+        }
+
+        BleClient client;
+        try
+        {
+            client = await BleClient.StartAsync(app.LoggerFactory.CreateLogger<BleClient>(), options, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (GoveeException ex)
+        {
+            if (options.Enabled == true)
+            {
+                log.LogError("Bluetooth is enabled but unavailable: {Message}", ex.Message);
+            }
+            else
+            {
+                log.LogInformation("Bluetooth control is off: {Message}", ex.Message);
+            }
+            app.State.BleUnavailableReason = ex.Message;
+            return null;
+        }
+
+        client.StatusReported = (device, frame) => app.State.ApplyBleFrameAsync(device, frame, cancellationToken);
+        app.State.BleClient = client;
+        return client;
+    }
+
+    /// <summary>
+    /// Keeps looking for devices that are still unmatched, backing off so a
+    /// light that lives out of range does not keep the radio scanning forever.
+    /// </summary>
+    private static async Task BleRescanLoopAsync(GoveeApp app, BleClient ble, ILogger log, CancellationToken cancellationToken)
+    {
+        var interval = TimeSpan.FromMinutes(5);
+        var maxInterval = TimeSpan.FromHours(1);
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+
+            var devices = await app.State.GetDevicesAsync().ConfigureAwait(false);
+            var unmatched = devices.Any(d => d.LanDevice is null && d.BleDevice is null
+                && (d.IsBleOnlyDevice() == true || d.CloudReportsOffline() || ble.Options.Prefer));
+            if (!unmatched)
+            {
+                interval = TimeSpan.FromMinutes(5);
+                continue;
+            }
+
+            var report = await app.State.ScanBluetoothAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (report.Changed)
+            {
+                interval = TimeSpan.FromMinutes(5);
+            }
+            else
+            {
+                interval = interval * 2 > maxInterval ? maxInterval : interval * 2;
+            }
+        }
+    }
+
     private static async Task<LanClient?> StartLanDiscoveryAsync(GoveeApp app, ILogger log, CancellationToken cancellationToken)
     {
         var options = app.Options.ToDiscoOptions();
@@ -248,6 +326,19 @@ public static class ServeCommand
             if (device.LanDevice is { } lan)
             {
                 log.LogInformation("  LAN API: ip={Ip}", lan.Ip);
+            }
+
+            if (device.BleDevice is { } ble)
+            {
+                var profile = BleLightProfile.Resolve(device.Sku);
+                log.LogInformation("  Bluetooth: address={Address} name={Name} colour_mode=0x{Mode:x2} brightness={Scale}",
+                    ble.Address, ble.Name, (byte)profile.ColorMode, profile.BrightnessAsPercent ? "percent" : "byte");
+            }
+            else if (app.State.BleClient is not null && device.LanDevice is null && device.CloudReportsOffline())
+            {
+                log.LogWarning("  Govee's cloud reports this device offline and it was not found over Bluetooth. " +
+                               "Expected address {Address}; run `ble-scan` to see what is in range.",
+                    device.ExpectedBleAddress() ?? "unknown");
             }
 
             if (device.HttpDeviceInfo is { } info)
@@ -354,7 +445,7 @@ public static class ServeCommand
     private static async Task PollSingleDeviceAsync(ServiceState state, ILogger log, Device device, CancellationToken cancellationToken)
     {
         // BLE-only devices cannot be reached over the network at all.
-        if (device.IsBleOnlyDevice() == true)
+        if (device.IsBleOnlyDevice() == true && device.BleDevice is null)
         {
             return;
         }
@@ -386,6 +477,15 @@ public static class ServeCommand
                 return;
             }
             log.LogDebug("LAN device {Device} has gone quiet; asking the cloud APIs instead", device);
+        }
+
+        // A device the cloud cannot reach is read over Bluetooth instead, so a
+        // change made from the Govee app over Bluetooth is picked up too.
+        if (device.BleDevice is not null
+            && (device.IsBleOnlyDevice() == true || device.CloudReportsOffline() || device.HttpDeviceInfo is null)
+            && await state.PollBleAsync(device, cancellationToken).ConfigureAwait(false))
+        {
+            return;
         }
 
         if (!needsPlatform && await state.PollIotApiAsync(device, cancellationToken).ConfigureAwait(false))

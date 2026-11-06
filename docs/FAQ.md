@@ -11,12 +11,24 @@ If it appears in the Govee app, the bridge will most likely find it. What you ca
   source for scenes, segments and sensor readings.
 * **AWS IoT** — needs your Govee account. Gives push status updates for lights
   and a few other device types.
+* **Bluetooth** — needs an adapter on the host within range of the light. The
+  path for lights with no LAN API that the cloud cannot reach, and for
+  Bluetooth-only models. See [BLE.md](BLE.md).
 
-Bluetooth-only devices cannot be controlled: there is no BLE support. The bridge
-recognises the common BLE-only models and skips advertising them rather than
-creating entities that never work.
+A Bluetooth-only device that is not within range of the host is skipped rather
+than given entities that never work.
 
 Run `novee2mqtt list` to see what was found and from where.
+
+## The cloud says "Device is offline. Please check the Wi-Fi connection"
+
+Govee's cloud cannot reach the device, usually because it is on a network with
+no internet route. No cloud command will work until it can. If the device
+supports the LAN API, enable it. Otherwise the bridge can control it over
+Bluetooth from the host's adapter — see [BLE.md](BLE.md). Press the Bluetooth
+button in the control panel to see what is in range; the startup log also shows
+`Bluetooth: address=…` under each matched device, or a warning with the address
+it expected.
 
 ## Nothing appears in Home Assistant
 

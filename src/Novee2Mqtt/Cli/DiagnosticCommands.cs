@@ -184,6 +184,165 @@ public static class DiagnosticCommands
         return 0;
     }
 
+    /// <summary>
+    /// Scans over Bluetooth and prints every Govee device in range, alongside
+    /// which configured device it would be matched to.
+    /// </summary>
+    public static async Task<int> BleScanAsync(GoveeApp app, ArgParser parser, CancellationToken cancellationToken)
+    {
+        var options = app.Options.ToBleOptions();
+        await using var ble = await BleClient.StartAsync(app.LoggerFactory.CreateLogger<BleClient>(), options, cancellationToken)
+            .ConfigureAwait(false);
+
+        var seconds = parser.GetInt("seconds") ?? options.ScanSeconds;
+        Console.Error.WriteLine($"Scanning on {ble.AdapterName} for {seconds} seconds...");
+        var found = await ble.ScanAsync(TimeSpan.FromSeconds(seconds), cancellationToken).ConfigureAwait(false);
+
+        // Known device ids, so the scan can say which ones it accounts for.
+        var known = new Dictionary<string, Devices.Device>(StringComparer.OrdinalIgnoreCase);
+        if (!parser.HasFlag("skip-cloud"))
+        {
+            try
+            {
+                if (app.CreatePlatformClient() is { } platform)
+                {
+                    foreach (var info in await platform.GetDevicesAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        var device = new Devices.Device(info.Sku, info.Device);
+                        device.SetHttpDeviceInfo(info);
+                        known[info.Device] = device;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Console.Error.WriteLine($"Platform API device list unavailable: {ex.Message}");
+            }
+        }
+
+        if (found.Count == 0)
+        {
+            Console.WriteLine("No Govee devices seen. Other devices in range: " +
+                              (ble.Seen.Count == 0 ? "none" : ble.Seen.Count.ToString()));
+        }
+
+        foreach (var result in found)
+        {
+            var match = known.Values.FirstOrDefault(d => ble.Resolve(d.Sku, d.Id)?.Address == result.Address);
+            var profile = BleLightProfile.Resolve(result.Sku ?? "");
+            var encrypted = result.Encrypted switch { true => "yes", false => "no", null => "?" };
+            Console.WriteLine(
+                $"{result.Address} {result.Name,-22} rssi={result.Rssi?.ToString() ?? "?",4} encrypted={encrypted,-3} " +
+                $"colour_mode=0x{(byte)profile.ColorMode:x2} brightness={(profile.BrightnessAsPercent ? "percent" : "byte"),-7} " +
+                (match is null ? "(not in your Govee account, or no credentials)" : $"-> {match.Name()} ({match.Id})"));
+        }
+
+        foreach (var device in known.Values)
+        {
+            if (ble.Resolve(device.Sku, device.Id) is null)
+            {
+                Console.WriteLine($"not seen: {device.Name()} ({device.Id}), expected at {BleClient.ExpectedAddress(device.Id) ?? "?"}");
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>Controls one device directly over Bluetooth, bypassing all state tracking.</summary>
+    public static async Task<int> BleControlAsync(GoveeApp app, ArgParser parser, CancellationToken cancellationToken)
+    {
+        var addressText = parser.GetString("address")
+            ?? throw new GoveeException("ble-control requires --address <bluetooth address>");
+        var address = BleNaming.NormalizeAddress(addressText)
+            ?? throw new GoveeException($"--address expects a Bluetooth address such as AA:BB:CC:DD:EE:FF, got '{addressText}'");
+        var sku = parser.GetString("sku")?.ToUpperInvariant()
+            ?? throw new GoveeException("ble-control requires --sku <model>, for example --sku H6008");
+
+        if (parser.GetString("color-mode") is { } mode)
+        {
+            var current = BleLightProfile.Resolve(sku);
+            BleLightProfile.Overrides[sku] = current with { ColorMode = BleLightProfile.ParseColorMode(mode) };
+        }
+        if (parser.GetString("brightness-scale") is { } scale)
+        {
+            var current = BleLightProfile.Resolve(sku);
+            BleLightProfile.Overrides[sku] = current with { BrightnessAsPercent = !scale.Equals("byte", StringComparison.OrdinalIgnoreCase) };
+        }
+
+        var options = app.Options.ToBleOptions();
+        await using var ble = await BleClient.StartAsync(app.LoggerFactory.CreateLogger<BleClient>(), options, cancellationToken)
+            .ConfigureAwait(false);
+
+        var device = new BleDevice(address, sku, $"{sku} at {address}");
+        var profile = BleLightProfile.Resolve(sku);
+        Console.Error.WriteLine($"Using colour mode 0x{(byte)profile.ColorMode:x2}, brightness as {(profile.BrightnessAsPercent ? "percent" : "byte")}");
+
+        var positional = parser.Positional;
+        var subCommand = positional.Count > 1 ? positional[1].ToLowerInvariant() : "";
+        var argument = positional.Count > 2 ? positional[2] : null;
+
+        try
+        {
+            switch (subCommand)
+            {
+                case "on":
+                    await ble.SendTurnAsync(device, true, cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case "off":
+                    await ble.SendTurnAsync(device, false, cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case "brightness":
+                    await ble.SendBrightnessAsync(device, RequireInt(argument, "brightness"), cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case "temperature":
+                    await ble.SendColorTemperatureAsync(device, RequireInt(argument, "temperature"), cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case "color":
+                    await ble.SendColorRgbAsync(device, CssColor.Parse(argument ?? ""), cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case "status":
+                    break;
+
+                case "command":
+                    var bytes = positional.Skip(2).Select(ParseByte).ToArray();
+                    var frame = PacketManager.Frame(bytes);
+                    Console.WriteLine($"frame: {Convert.ToHexString(frame)}");
+                    await ble.SendFramesAsync(device, [frame], cancellationToken).ConfigureAwait(false);
+                    break;
+
+                default:
+                    throw new GoveeException(
+                        "ble-control needs one of: on, off, brightness <percent>, temperature <kelvin>, " +
+                        "color <css-color>, status, command <byte>...");
+            }
+
+            var replies = await ble.QueryStatusAsync(device, cancellationToken).ConfigureAwait(false);
+            var status = LanDeviceStatus.Empty;
+            foreach (var reply in replies)
+            {
+                Console.WriteLine($"reply: {Convert.ToHexString(reply)}");
+                status = LightFrames.ApplyReply(profile, status, reply) ?? status;
+            }
+
+            Console.WriteLine(replies.Count == 0
+                ? "The device answered no status query. A write it ignored looks the same, so check the light itself."
+                : status.On
+                    ? $"on {status.Brightness}% {status.Color} {(status.ColorTemperatureKelvin > 0 ? status.ColorTemperatureKelvin + "k" : "")}"
+                    : "off");
+        }
+        finally
+        {
+            await ble.DisconnectAsync(device).ConfigureAwait(false);
+        }
+
+        return 0;
+    }
+
     /// <summary>Controls one device directly over the LAN, bypassing all state tracking.</summary>
     public static async Task<int> LanControlAsync(GoveeApp app, ArgParser parser, CancellationToken cancellationToken)
     {

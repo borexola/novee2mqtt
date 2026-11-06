@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Novee2Mqtt.Ble;
 using Novee2Mqtt.Core;
 using Novee2Mqtt.Hass;
@@ -13,8 +14,9 @@ namespace Novee2Mqtt.Devices;
 /// <summary>
 /// Holds every known device plus the API clients that are configured, and owns
 /// the decisions about which transport to use for a given operation. The order
-/// is always LAN first, then IoT, then the Platform API: lowest latency and
-/// least likely to be rate limited first.
+/// is LAN first, then IoT, then the Platform API: lowest latency and least
+/// likely to be rate limited first. Bluetooth sits ahead of the cloud paths for
+/// a device the cloud cannot reach, and behind them as a fallback otherwise.
 /// </summary>
 public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCatalog)
 {
@@ -23,6 +25,10 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
     private readonly Dictionary<string, SemaphoreSlim> _controlLocks = new(StringComparer.Ordinal);
 
     public LanClient? LanClient { get; set; }
+    public BleClient? BleClient { get; set; }
+
+    /// <summary>Why Bluetooth is off, when it is; shown by the API and the panel.</summary>
+    public string? BleUnavailableReason { get; set; }
     public PlatformApiClient? PlatformClient { get; set; }
     public UndocumentedApiClient? UndocClient { get; set; }
     public IotClient? IotClient { get; set; }
@@ -262,11 +268,25 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             return;
         }
 
-        if (device.PollableViaIot() && IotClient is not null)
+        if (device.PollableViaLan())
         {
             return;
         }
-        if (device.PollableViaLan())
+        if (UsesBleFirst(device))
+        {
+            // The device answers status queries on the same connection, so no
+            // settling delay is needed.
+            try
+            {
+                await PollBleAsync(device).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                log.LogError("Polling {Device} failed: {Message}", device, ex.Message);
+            }
+            return;
+        }
+        if (device.PollableViaIot() && IotClient is not null)
         {
             return;
         }
@@ -319,7 +339,8 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
         Func<IotClient, Undocumented.DeviceEntry, Task>? iotAction,
         Func<PlatformApiClient, HttpDeviceInfo, Task>? platformAction,
         CancellationToken cancellationToken,
-        bool clearsScene = false)
+        bool clearsScene = false,
+        BleAction? bleAction = null)
     {
         if (lanAction is not null && device.LanDevice is { } lanDevice && LanClient is { } lan)
         {
@@ -335,22 +356,270 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             return;
         }
 
-        if (iotAction is not null && device.IotApiSupported() && IotClient is { } iot && device.UndocDeviceInfo is { } undoc)
+        var ble = bleAction is not null && device.BleDevice is not null && BleClient is not null;
+        var iot = iotAction is not null && device.IotApiSupported() && IotClient is not null && device.UndocDeviceInfo is not null;
+        var platform = platformAction is not null && PlatformClient is not null && device.HttpDeviceInfo is not null;
+
+        // A device the cloud reports offline will not hear a cloud command, and
+        // the IoT publish would not even fail: Bluetooth is the only real path.
+        if (ble && (!iot && !platform || UsesBleFirst(device)))
         {
-            log.LogInformation("Using IoT API to set {Device} {What}", device, what);
-            await iotAction(iot, undoc.Entry).ConfigureAwait(false);
-            return;
+            try
+            {
+                await BleControlAsync(device, what, bleAction!, clearsScene, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (GoveeException ex) when (iot || platform)
+            {
+                // The offline verdict may be stale, and the light may be out of
+                // Bluetooth range, so the cloud still deserves a try.
+                log.LogWarning("Bluetooth control of {Device} failed ({Message}); trying the cloud", device, ex.Message);
+                ble = false;
+            }
         }
 
-        if (platformAction is not null && PlatformClient is { } client && device.HttpDeviceInfo is { } info)
+        try
         {
-            log.LogInformation("Using Platform API to set {Device} {What}", device, what);
-            await platformAction(client, info).ConfigureAwait(false);
-            await ClearSceneIfNeededAsync(device, clearsScene).ConfigureAwait(false);
+            if (iot)
+            {
+                log.LogInformation("Using IoT API to set {Device} {What}", device, what);
+                await iotAction!(IotClient!, device.UndocDeviceInfo!.Entry).ConfigureAwait(false);
+                return;
+            }
+
+            if (platform)
+            {
+                log.LogInformation("Using Platform API to set {Device} {What}", device, what);
+                await platformAction!(PlatformClient!, device.HttpDeviceInfo!).ConfigureAwait(false);
+                await ClearSceneIfNeededAsync(device, clearsScene).ConfigureAwait(false);
+                return;
+            }
+        }
+        catch (GoveeException ex) when (ble)
+        {
+            log.LogWarning("Cloud control of {Device} failed ({Message}); trying Bluetooth", device, ex.Message);
+            await BleControlAsync(device, what, bleAction!, clearsScene, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         throw new GoveeException($"Unable to control {what} for {device}");
+    }
+
+    /// <summary>
+    /// A frame to write over Bluetooth, plus how the device's state looks once
+    /// it has been applied. Bluetooth gives no acknowledgement, so the state is
+    /// recorded optimistically and corrected by the device's next reply.
+    /// </summary>
+    internal sealed record BleAction(
+        Func<BleClient, BleDevice, Task> Send,
+        Func<LanDeviceStatus, LanDeviceStatus> Apply);
+
+    /// <summary>
+    /// Whether Bluetooth should be tried before the cloud: when configured to,
+    /// or when the cloud itself says the device is unreachable.
+    /// </summary>
+    private bool UsesBleFirst(Device device)
+    {
+        if (device.BleDevice is null || BleClient is null)
+        {
+            return false;
+        }
+        if (BleClient.Options.Prefer || device.IsBleOnlyDevice() == true || device.CloudReportsOffline())
+        {
+            return true;
+        }
+        var iot = device.IotApiSupported() && IotClient is not null && device.UndocDeviceInfo is not null;
+        var platform = PlatformClient is not null && device.HttpDeviceInfo is not null;
+        return !iot && !platform;
+    }
+
+    private async Task BleControlAsync(Device device, string what, BleAction action, bool clearsScene, CancellationToken cancellationToken)
+    {
+        var bleDevice = device.BleDevice!;
+        log.LogInformation("Using Bluetooth to set {Device} {What}", device, what);
+        await action.Send(BleClient!, bleDevice).ConfigureAwait(false);
+
+        await UpdateDeviceAsync(device.Sku, device.Id, d =>
+        {
+            d.SetBleDeviceStatus(action.Apply(CurrentBleStatus(d)));
+        }).ConfigureAwait(false);
+
+        await ClearSceneIfNeededAsync(device, clearsScene).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads a device's state over Bluetooth and republishes it.</summary>
+    public async Task<bool> PollBleAsync(Device device, CancellationToken cancellationToken = default)
+    {
+        if (BleClient is not { } ble || device.BleDevice is not { } bleDevice)
+        {
+            return false;
+        }
+
+        log.LogDebug("Requesting update via Bluetooth for {Device}", device);
+        IReadOnlyList<byte[]> replies;
+        try
+        {
+            replies = await ble.QueryStatusAsync(bleDevice, cancellationToken).ConfigureAwait(false);
+        }
+        catch (GoveeException ex)
+        {
+            log.LogWarning("Bluetooth status query for {Device} failed: {Message}", device, ex.Message);
+            return false;
+        }
+
+        if (replies.Count == 0)
+        {
+            return false;
+        }
+
+        var changed = false;
+        await UpdateDeviceAsync(device.Sku, device.Id, d =>
+        {
+            changed = ApplyBleReplies(d, replies);
+            d.SetLastPolled();
+        }).ConfigureAwait(false);
+        await NotifyOfStateChangeAsync(device.Id, changed, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Merges replies into what is already known, so a device that answers only
+    /// some queries does not lose the rest of its state.
+    /// </summary>
+    private static bool ApplyBleReplies(Device device, IEnumerable<byte[]> replies)
+    {
+        var profile = BleLightProfile.Resolve(device.Sku);
+        var status = CurrentBleStatus(device);
+        var any = false;
+
+        foreach (var reply in replies)
+        {
+            if (LightFrames.ApplyReply(profile, status, reply) is { } updated)
+            {
+                status = updated;
+                any = true;
+            }
+        }
+
+        return any && device.SetBleDeviceStatus(status);
+    }
+
+    private static LanDeviceStatus CurrentBleStatus(Device device)
+        => device.BleDeviceStatus ?? (device.ComputeDeviceState() is { } existing
+            ? new LanDeviceStatus(existing.On, existing.Brightness, existing.Color, existing.Kelvin)
+            : LanDeviceStatus.Empty);
+
+    private readonly SemaphoreSlim _bleScanLock = new(1, 1);
+
+    /// <summary>
+    /// Scans for Bluetooth devices, attaches every device without a LAN path
+    /// to the one at its expected address, and reports what was seen. Used at
+    /// startup, by the periodic rescan, and from the panel's scan button.
+    /// </summary>
+    public async Task<BleScanReport> ScanBluetoothAsync(int? seconds = null, CancellationToken cancellationToken = default)
+    {
+        var ble = BleClient ?? throw new GoveeException(BleUnavailableReason ?? "Bluetooth is not available");
+        var duration = Math.Clamp(seconds ?? ble.Options.ScanSeconds, 1, 120);
+
+        await _bleScanLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            log.LogInformation("Scanning for Bluetooth devices for {Seconds} seconds", duration);
+            string? error = null;
+            try
+            {
+                await ble.ScanAsync(TimeSpan.FromSeconds(duration), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogWarning("Bluetooth scan failed: {Message}", ex.Message);
+                error = ex.Message;
+            }
+
+            var govee = ble.GoveeDevicesSeen();
+            log.LogInformation("Bluetooth scan saw {Count} Govee device(s): {Names}",
+                govee.Count, govee.Count == 0 ? "none" : string.Join(", ", govee.Select(g => g.Name)));
+
+            var changed = false;
+            var devices = await GetDevicesAsync().ConfigureAwait(false);
+            foreach (var device in devices)
+            {
+                if (device.LanDevice is not null || device.BleDevice is not null
+                    || device.GetDeviceType() != Platform.DeviceType.Light)
+                {
+                    continue;
+                }
+                if (ble.Resolve(device.Sku, device.Id, device.AccountBleAddress(), device.AccountBleName()) is not { } match)
+                {
+                    continue;
+                }
+
+                log.LogInformation("{Device} is reachable over Bluetooth as {Match}", device, match);
+                await UpdateDeviceAsync(device.Sku, device.Id, d => d.SetBleDevice(match)).ConfigureAwait(false);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                devices = await GetDevicesAsync().ConfigureAwait(false);
+                if (HassClient is { } hass)
+                {
+                    try
+                    {
+                        await hass.RegisterWithHassAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        log.LogError("Re-registering with Home Assistant failed: {Message}", ex.Message);
+                    }
+                }
+            }
+
+            var byAddress = devices.Where(d => d.BleDevice is not null)
+                .GroupBy(d => d.BleDevice!.Address, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+            var seen = govee.Select(g =>
+            {
+                byAddress.TryGetValue(g.Address, out var matched);
+                var profile = BleLightProfile.Resolve(g.Sku ?? "");
+                return new BleScanReport.SeenDevice(
+                    g.Address, g.Name ?? "", g.Sku ?? "", g.Rssi,
+                    matched?.Id, matched?.Name(),
+                    $"{(byte)profile.ColorMode:x2}", profile.BrightnessAsPercent ? "percent" : "byte");
+            }).ToList();
+
+            // Devices the cloud cannot reach that Bluetooth did not find either.
+            var missing = devices
+                .Where(d => d.LanDevice is null && d.BleDevice is null
+                            && (d.IsBleOnlyDevice() == true || d.CloudReportsOffline() || PlatformClient is null))
+                .Select(d => new BleScanReport.MissingDevice(d.Id, d.Name(), d.Sku, d.ExpectedBleAddress()))
+                .ToList();
+
+            return new BleScanReport(ble.AdapterName, duration, seen, missing, changed, ble.Seen.Count, error);
+        }
+        finally
+        {
+            _bleScanLock.Release();
+        }
+    }
+
+    /// <summary>Handles a status frame that arrived on a Bluetooth connection unprompted.</summary>
+    public async Task ApplyBleFrameAsync(BleDevice bleDevice, byte[] frame, CancellationToken cancellationToken = default)
+    {
+        var device = (await GetDevicesAsync().ConfigureAwait(false))
+            .FirstOrDefault(d => d.BleDevice?.Address == bleDevice.Address);
+        if (device is null)
+        {
+            return;
+        }
+
+        var changed = false;
+        await UpdateDeviceAsync(device.Sku, device.Id, d => changed = ApplyBleReplies(d, [frame])).ConfigureAwait(false);
+        if (changed)
+        {
+            await NotifyOfStateChangeAsync(device.Id, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private Task ClearSceneIfNeededAsync(Device device, bool clearsScene)
@@ -376,7 +645,9 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             s => s.On == on,
             (iot, entry) => iot.SetPowerStateAsync(entry, on, cancellationToken),
             (client, info) => client.SetToggleStateAsync(info, instanceName, on, cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            bleAction: new((ble, d) => ble.SendTurnAsync(d, on, cancellationToken), s => s with { On = on }))
+            .ConfigureAwait(false);
     }
 
     public Task DevicePowerOnAsync(Device device, bool on, CancellationToken cancellationToken = default)
@@ -385,7 +656,8 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             s => s.On == on,
             (iot, entry) => iot.SetPowerStateAsync(entry, on, cancellationToken),
             (client, info) => client.SetPowerStateAsync(info, on, cancellationToken),
-            cancellationToken);
+            cancellationToken,
+            bleAction: new((ble, d) => ble.SendTurnAsync(d, on, cancellationToken), s => s with { On = on }));
 
     public async Task DeviceSetBrightnessAsync(Device device, byte percent, CancellationToken cancellationToken = default)
     {
@@ -400,7 +672,10 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             s => s.Brightness == percent,
             (iot, entry) => iot.SetBrightnessAsync(entry, percent, cancellationToken),
             (client, info) => client.SetBrightnessAsync(info, percent, cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            bleAction: new((ble, d) => ble.SendBrightnessAsync(d, percent, cancellationToken),
+                s => s with { Brightness = percent, On = percent > 0 || s.On }))
+            .ConfigureAwait(false);
     }
 
     public Task DeviceSetColorTemperatureAsync(Device device, int kelvin, CancellationToken cancellationToken = default)
@@ -409,7 +684,9 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             s => s.ColorTemperatureKelvin == kelvin,
             (iot, entry) => iot.SetColorTemperatureAsync(entry, kelvin, cancellationToken),
             (client, info) => client.SetColorTemperatureAsync(info, kelvin, cancellationToken),
-            cancellationToken, clearsScene: true);
+            cancellationToken, clearsScene: true,
+            bleAction: new((ble, d) => ble.SendColorTemperatureAsync(d, kelvin, cancellationToken),
+                s => s with { ColorTemperatureKelvin = kelvin, Color = DeviceColor.Black, On = true }));
 
     public async Task DeviceSetColorRgbAsync(Device device, DeviceColor color, CancellationToken cancellationToken = default)
     {
@@ -425,7 +702,10 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
             s => s.Color == color,
             (iot, entry) => iot.SetColorRgbAsync(entry, color, cancellationToken),
             (client, info) => client.SetColorRgbAsync(info, color, cancellationToken),
-            cancellationToken, clearsScene: true).ConfigureAwait(false);
+            cancellationToken, clearsScene: true,
+            bleAction: new((ble, d) => ble.SendColorRgbAsync(d, color, cancellationToken),
+                s => s with { Color = color, ColorTemperatureKelvin = 0, On = true }))
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -668,6 +948,35 @@ public sealed class ServiceState(ILogger<ServiceState> log, SceneCatalog sceneCa
 
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(5);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _lastNotified = new(StringComparer.Ordinal);
+}
+
+/// <summary>What a Bluetooth scan found, for the log, the API and the panel.</summary>
+public sealed record BleScanReport(
+    [property: JsonPropertyName("adapter")] string Adapter,
+    [property: JsonPropertyName("seconds")] int Seconds,
+    [property: JsonPropertyName("seen")] List<BleScanReport.SeenDevice> Seen,
+    [property: JsonPropertyName("missing")] List<BleScanReport.MissingDevice> Missing,
+    [property: JsonPropertyName("changed")] bool Changed,
+    [property: JsonPropertyName("other_devices")] int OtherDevices,
+    [property: JsonPropertyName("error")] string? Error)
+{
+    /// <summary>A Govee device that advertised during the scan.</summary>
+    public sealed record SeenDevice(
+        [property: JsonPropertyName("address")] string Address,
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("sku")] string Sku,
+        [property: JsonPropertyName("rssi")] short? Rssi,
+        [property: JsonPropertyName("device_id")] string? DeviceId,
+        [property: JsonPropertyName("device_name")] string? DeviceName,
+        [property: JsonPropertyName("color_mode")] string ColorMode,
+        [property: JsonPropertyName("brightness_scale")] string BrightnessScale);
+
+    /// <summary>A device that needs Bluetooth but was not found.</summary>
+    public sealed record MissingDevice(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("name")] string Name,
+        [property: JsonPropertyName("sku")] string Sku,
+        [property: JsonPropertyName("expected_address")] string? ExpectedAddress);
 }
 
 /// <summary>

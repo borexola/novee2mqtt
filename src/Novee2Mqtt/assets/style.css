@@ -334,6 +334,7 @@ main {
 }
 
 .tag--lan { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+.tag--ble { color: #4cc3ff; border-color: color-mix(in srgb, #4cc3ff 32%, transparent); }
 .tag--iot { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
 .tag--cloud { color: #b06bff; border-color: color-mix(in srgb, #b06bff 32%, transparent); }
 .tag--offline { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 32%, transparent); }
@@ -523,6 +524,49 @@ select {
 }
 
 .card__id { font-family: var(--mono); font-size: 0.66rem; }
+
+/* ------------------------------------------------------------------ sheet */
+
+.sheet {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.sheet::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(4px); }
+.sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sheet__head h2 { font-size: 1rem; font-weight: 650; margin: 0; }
+.sheet__body { padding: 14px 18px 18px; font-size: 0.84rem; color: var(--text-dim); overflow: auto; }
+.sheet__body h3 { font-size: 0.72rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-faint); margin: 14px 0 8px; }
+.sheet__body h3:first-child { margin-top: 0; }
+.sheet__body p { margin: 0 0 8px; }
+.sheet__body code { font-family: var(--mono); font-size: 0.78rem; color: var(--text); }
+.blelist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.blelist li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+}
+.blelist__name { color: var(--text); font-weight: 600; }
+.blelist__meta { grid-column: 1 / -1; font-family: var(--mono); font-size: 0.7rem; color: var(--text-faint); }
+.blelist__rssi { font-family: var(--mono); font-size: 0.72rem; color: var(--text-faint); }
+.iconbtn--busy svg { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
 
 /* ------------------------------------------------------------ empty/toasts */
 
