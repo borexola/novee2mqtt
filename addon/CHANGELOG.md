@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.0.4
+
+Controls lights that Govee's cloud cannot reach, over the Bluetooth adapter on
+the Home Assistant host.
+
+### Changed
+
+- The add-on now asks for access to the host's D-Bus and ships its own AppArmor
+  profile, because the default one refuses D-Bus calls. The profile is the
+  default's rules plus BlueZ.
 
 ### Added
 
